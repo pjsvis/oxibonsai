@@ -1,0 +1,532 @@
+//! Runtime kernel dispatch with CPU feature detection.
+//!
+//! Uses SciRS2-Core's SIMD capability detection to select the best available
+//! kernel implementation at runtime. Falls back to scalar reference
+//! when no SIMD acceleration is available.
+//!
+//! The selection hierarchy (highest priority first):
+//! 1. AVX-512F (x86-64 only)
+//! 2. AVX2 + FMA (x86-64 only)
+//! 3. NEON (AArch64 only)
+//! 4. Reference (scalar — always available)
+
+use crate::dequant;
+use crate::error::KernelResult;
+use crate::gemm;
+use crate::gemv;
+use crate::traits::OneBitKernel;
+use crate::weight_cache::GpuWeightHandle;
+use oxibonsai_core::tensor::BlockQ1_0G128;
+#[cfg(feature = "gpu")]
+use std::sync::Arc;
+
+/// Kernel implementation tier, ordered from slowest to fastest.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KernelTier {
+    /// Pure scalar Rust — correctness reference.
+    Reference,
+    /// AVX2 + FMA (256-bit SIMD, x86-64).
+    #[cfg(target_arch = "x86_64")]
+    Avx2,
+    /// AVX-512F + AVX-512BW + AVX-512VL (512-bit SIMD, x86-64).
+    #[cfg(target_arch = "x86_64")]
+    Avx512,
+    /// NEON (128-bit SIMD, AArch64).
+    #[cfg(target_arch = "aarch64")]
+    Neon,
+    /// GPU-accelerated (Metal / CUDA via scirs2-core).
+    #[cfg(feature = "gpu")]
+    Gpu,
+}
+
+impl std::fmt::Display for KernelTier {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Reference => write!(f, "reference"),
+            #[cfg(target_arch = "x86_64")]
+            Self::Avx2 => write!(f, "avx2+fma"),
+            #[cfg(target_arch = "x86_64")]
+            Self::Avx512 => write!(f, "avx512f+bw+vl"),
+            #[cfg(target_arch = "aarch64")]
+            Self::Neon => write!(f, "neon"),
+            #[cfg(feature = "gpu")]
+            Self::Gpu => write!(f, "gpu"),
+        }
+    }
+}
+
+/// Dispatches kernel calls to the best available implementation.
+///
+/// Uses [`scirs2_core::simd::detect::CpuFeatures`] for CPU feature
+/// detection, ensuring consistent SIMD dispatch across the COOLJAPAN ecosystem.
+pub struct KernelDispatcher {
+    tier: KernelTier,
+    /// GPU backend handle, available when `gpu` feature is enabled and a
+    /// hardware-accelerated backend was detected at construction time.
+    #[cfg(feature = "gpu")]
+    gpu_backend: Option<Arc<dyn crate::gpu_backend::GpuBackendTrait>>,
+}
+
+impl KernelDispatcher {
+    /// Create a dispatcher that auto-detects the best available kernel tier.
+    ///
+    /// Queries SciRS2-Core's cached `CpuFeatures` to determine the
+    /// optimal tier for the current CPU.
+    pub fn auto_detect() -> Self {
+        // Try GPU first when the feature is compiled in.
+        #[cfg(feature = "gpu")]
+        {
+            let backend = crate::gpu_backend::select_backend();
+            if backend.is_accelerated() {
+                tracing::info!(backend = backend.name(), "GPU backend available");
+                return Self {
+                    tier: KernelTier::Gpu,
+                    gpu_backend: Some(Arc::from(backend)),
+                };
+            }
+        }
+
+        let caps = scirs2_core::simd::detect::get_cpu_features();
+        let tier = Self::select_tier(caps);
+        tracing::info!(tier = %tier, "selected kernel tier");
+        Self {
+            tier,
+            #[cfg(feature = "gpu")]
+            gpu_backend: None,
+        }
+    }
+
+    /// Create a dispatcher with a specific tier (for testing/benchmarks).
+    pub fn with_tier(tier: KernelTier) -> Self {
+        Self {
+            tier,
+            #[cfg(feature = "gpu")]
+            gpu_backend: None,
+        }
+    }
+
+    /// Create a dispatcher that uses the GPU backend with the given handle.
+    #[cfg(feature = "gpu")]
+    pub fn with_gpu(backend: Arc<dyn crate::gpu_backend::GpuBackendTrait>) -> Self {
+        Self {
+            tier: KernelTier::Gpu,
+            gpu_backend: Some(backend),
+        }
+    }
+
+    /// Get the selected kernel tier.
+    pub fn tier(&self) -> KernelTier {
+        self.tier
+    }
+
+    /// Select best tier based on detected capabilities.
+    fn select_tier(caps: &scirs2_core::simd::detect::CpuFeatures) -> KernelTier {
+        #[cfg(target_arch = "x86_64")]
+        {
+            // AVX-512 has higher priority than AVX2
+            if caps.has_avx512f {
+                return KernelTier::Avx512;
+            }
+            if caps.has_avx2 && caps.has_fma {
+                return KernelTier::Avx2;
+            }
+        }
+
+        #[cfg(target_arch = "aarch64")]
+        {
+            if caps.has_neon {
+                return KernelTier::Neon;
+            }
+        }
+
+        // Suppress unused-variable warning on architectures with no SIMD paths
+        let _ = caps;
+        KernelTier::Reference
+    }
+}
+
+/// Minimum number of rows before the GPU path is worthwhile.
+///
+/// Below this threshold the overhead of host-to-device transfer exceeds the
+/// compute savings, so we fall back to the best SIMD tier.
+#[cfg(feature = "gpu")]
+const GPU_MIN_ROWS: usize = 1024;
+
+impl KernelDispatcher {
+    /// Return the best CPU-only tier for use as GPU fallback.
+    #[cfg(feature = "gpu")]
+    fn cpu_tier() -> KernelTier {
+        let caps = scirs2_core::simd::detect::get_cpu_features();
+        Self::select_tier(caps)
+    }
+
+    /// Dispatch a `dequant` call using the best *CPU* tier.
+    #[cfg(feature = "gpu")]
+    fn cpu_dequant(blocks: &[BlockQ1_0G128], output: &mut [f32]) -> KernelResult<()> {
+        match Self::cpu_tier() {
+            KernelTier::Reference => dequant::dequant_1bit_g128(blocks, output),
+            #[cfg(target_arch = "x86_64")]
+            KernelTier::Avx2 => unsafe { crate::simd_avx2::dequant_1bit_g128_avx2(blocks, output) },
+            #[cfg(target_arch = "x86_64")]
+            KernelTier::Avx512 => unsafe {
+                crate::simd_avx512::dequant_1bit_g128_avx512(blocks, output)
+            },
+            #[cfg(target_arch = "aarch64")]
+            KernelTier::Neon => unsafe { crate::simd_neon::dequant_1bit_g128_neon(blocks, output) },
+            #[cfg(feature = "gpu")]
+            KernelTier::Gpu => dequant::dequant_1bit_g128(blocks, output),
+        }
+    }
+
+    /// Dispatch a `gemv` call using the best *CPU* tier.
+    #[cfg(feature = "gpu")]
+    fn cpu_gemv(
+        blocks: &[BlockQ1_0G128],
+        input: &[f32],
+        output: &mut [f32],
+        n_rows: usize,
+        k: usize,
+    ) -> KernelResult<()> {
+        match Self::cpu_tier() {
+            KernelTier::Reference => gemv::gemv_1bit_g128(blocks, input, output, n_rows, k),
+            #[cfg(target_arch = "x86_64")]
+            KernelTier::Avx2 => unsafe {
+                crate::simd_avx2::gemv_1bit_g128_avx2(blocks, input, output, n_rows, k)
+            },
+            #[cfg(target_arch = "x86_64")]
+            KernelTier::Avx512 => unsafe {
+                crate::simd_avx512::gemv_1bit_g128_avx512(blocks, input, output, n_rows, k)
+            },
+            #[cfg(target_arch = "aarch64")]
+            KernelTier::Neon => unsafe {
+                crate::simd_neon::gemv_1bit_g128_neon(blocks, input, output, n_rows, k)
+            },
+            #[cfg(feature = "gpu")]
+            KernelTier::Gpu => gemv::gemv_1bit_g128(blocks, input, output, n_rows, k),
+        }
+    }
+
+    /// Dispatch a `gemm` call using the best *CPU* tier.
+    #[cfg(feature = "gpu")]
+    fn cpu_gemm(
+        blocks: &[BlockQ1_0G128],
+        input: &[f32],
+        output: &mut [f32],
+        m: usize,
+        n_rows: usize,
+        k: usize,
+    ) -> KernelResult<()> {
+        match Self::cpu_tier() {
+            KernelTier::Reference => gemm::gemm_1bit_g128(blocks, input, output, m, n_rows, k),
+            #[cfg(target_arch = "x86_64")]
+            KernelTier::Avx2 => unsafe {
+                crate::simd_avx2::gemm_1bit_g128_avx2(blocks, input, output, m, n_rows, k)
+            },
+            #[cfg(target_arch = "x86_64")]
+            KernelTier::Avx512 => unsafe {
+                crate::simd_avx512::gemm_1bit_g128_avx512(blocks, input, output, m, n_rows, k)
+            },
+            #[cfg(target_arch = "aarch64")]
+            KernelTier::Neon => unsafe {
+                crate::simd_neon::gemm_1bit_g128_neon(blocks, input, output, m, n_rows, k)
+            },
+            #[cfg(feature = "gpu")]
+            KernelTier::Gpu => gemm::gemm_1bit_g128(blocks, input, output, m, n_rows, k),
+        }
+    }
+
+    /// Reinterpret a slice of `BlockQ1_0G128` as raw bytes (zero-copy).
+    ///
+    /// # Safety
+    /// `BlockQ1_0G128` is `#[repr(C)]` with a well-defined 18-byte layout,
+    /// so this transmute is safe.
+    #[cfg(feature = "gpu")]
+    fn blocks_as_bytes(blocks: &[BlockQ1_0G128]) -> &[u8] {
+        let ptr = blocks.as_ptr() as *const u8;
+        let len = std::mem::size_of_val(blocks);
+        // SAFETY: BlockQ1_0G128 is repr(C), POD-like, with no padding.
+        unsafe { std::slice::from_raw_parts(ptr, len) }
+    }
+}
+
+impl OneBitKernel for KernelDispatcher {
+    fn dequant(&self, blocks: &[BlockQ1_0G128], output: &mut [f32]) -> KernelResult<()> {
+        match self.tier {
+            KernelTier::Reference => dequant::dequant_1bit_g128(blocks, output),
+            #[cfg(target_arch = "x86_64")]
+            KernelTier::Avx2 => unsafe { crate::simd_avx2::dequant_1bit_g128_avx2(blocks, output) },
+            #[cfg(target_arch = "x86_64")]
+            KernelTier::Avx512 => unsafe {
+                crate::simd_avx512::dequant_1bit_g128_avx512(blocks, output)
+            },
+            #[cfg(target_arch = "aarch64")]
+            KernelTier::Neon => unsafe { crate::simd_neon::dequant_1bit_g128_neon(blocks, output) },
+            // GPU dequant is not worth the transfer cost — use best CPU path.
+            #[cfg(feature = "gpu")]
+            KernelTier::Gpu => Self::cpu_dequant(blocks, output),
+        }
+    }
+
+    fn gemv(
+        &self,
+        blocks: &[BlockQ1_0G128],
+        input: &[f32],
+        output: &mut [f32],
+        n_rows: usize,
+        k: usize,
+    ) -> KernelResult<()> {
+        match self.tier {
+            KernelTier::Reference => gemv::gemv_1bit_g128(blocks, input, output, n_rows, k),
+            #[cfg(target_arch = "x86_64")]
+            KernelTier::Avx2 => unsafe {
+                crate::simd_avx2::gemv_1bit_g128_avx2(blocks, input, output, n_rows, k)
+            },
+            #[cfg(target_arch = "x86_64")]
+            KernelTier::Avx512 => unsafe {
+                crate::simd_avx512::gemv_1bit_g128_avx512(blocks, input, output, n_rows, k)
+            },
+            #[cfg(target_arch = "aarch64")]
+            KernelTier::Neon => unsafe {
+                crate::simd_neon::gemv_1bit_g128_neon(blocks, input, output, n_rows, k)
+            },
+            #[cfg(feature = "gpu")]
+            KernelTier::Gpu => {
+                if n_rows < GPU_MIN_ROWS {
+                    return Self::cpu_gemv(blocks, input, output, n_rows, k);
+                }
+                if let Some(ref backend) = self.gpu_backend {
+                    let bytes = Self::blocks_as_bytes(blocks);
+                    match backend.gemv_q1_g128(bytes, input, n_rows, k) {
+                        Ok(result) => {
+                            let copy_len = output.len().min(result.len());
+                            output[..copy_len].copy_from_slice(&result[..copy_len]);
+                            return Ok(());
+                        }
+                        Err(e) => {
+                            tracing::warn!(error = %e, "GPU gemv failed, falling back to CPU");
+                            return Self::cpu_gemv(blocks, input, output, n_rows, k);
+                        }
+                    }
+                }
+                Self::cpu_gemv(blocks, input, output, n_rows, k)
+            }
+        }
+    }
+
+    fn gemm(
+        &self,
+        blocks: &[BlockQ1_0G128],
+        input: &[f32],
+        output: &mut [f32],
+        m: usize,
+        n_rows: usize,
+        k: usize,
+    ) -> KernelResult<()> {
+        match self.tier {
+            KernelTier::Reference => gemm::gemm_1bit_g128(blocks, input, output, m, n_rows, k),
+            #[cfg(target_arch = "x86_64")]
+            KernelTier::Avx2 => unsafe {
+                crate::simd_avx2::gemm_1bit_g128_avx2(blocks, input, output, m, n_rows, k)
+            },
+            #[cfg(target_arch = "x86_64")]
+            KernelTier::Avx512 => unsafe {
+                crate::simd_avx512::gemm_1bit_g128_avx512(blocks, input, output, m, n_rows, k)
+            },
+            #[cfg(target_arch = "aarch64")]
+            KernelTier::Neon => unsafe {
+                crate::simd_neon::gemm_1bit_g128_neon(blocks, input, output, m, n_rows, k)
+            },
+            #[cfg(feature = "gpu")]
+            KernelTier::Gpu => {
+                if n_rows < GPU_MIN_ROWS {
+                    return Self::cpu_gemm(blocks, input, output, m, n_rows, k);
+                }
+                if let Some(ref backend) = self.gpu_backend {
+                    let bytes = Self::blocks_as_bytes(blocks);
+                    match backend.gemm_q1_g128(bytes, input, m, n_rows, k) {
+                        Ok(result) => {
+                            let copy_len = output.len().min(result.len());
+                            output[..copy_len].copy_from_slice(&result[..copy_len]);
+                            return Ok(());
+                        }
+                        Err(e) => {
+                            tracing::warn!(error = %e, "GPU gemm failed, falling back to CPU");
+                            return Self::cpu_gemm(blocks, input, output, m, n_rows, k);
+                        }
+                    }
+                }
+                Self::cpu_gemm(blocks, input, output, m, n_rows, k)
+            }
+        }
+    }
+
+    fn name(&self) -> &'static str {
+        match self.tier {
+            KernelTier::Reference => "Q1_0_g128 reference (scalar)",
+            #[cfg(target_arch = "x86_64")]
+            KernelTier::Avx2 => "Q1_0_g128 AVX2+FMA (256-bit)",
+            #[cfg(target_arch = "x86_64")]
+            KernelTier::Avx512 => "Q1_0_g128 AVX-512 (512-bit)",
+            #[cfg(target_arch = "aarch64")]
+            KernelTier::Neon => "Q1_0_g128 NEON (128-bit)",
+            #[cfg(feature = "gpu")]
+            KernelTier::Gpu => "Q1_0_g128 GPU (accelerated)",
+        }
+    }
+
+    fn upload_weights(&self, blocks: &[BlockQ1_0G128]) -> Option<GpuWeightHandle> {
+        #[cfg(feature = "gpu")]
+        {
+            if let (KernelTier::Gpu, Some(ref backend)) = (self.tier, &self.gpu_backend) {
+                let bytes = Self::blocks_as_bytes(blocks);
+                match backend.upload_weights_raw(bytes) {
+                    Ok(handle) => return Some(handle),
+                    Err(e) => {
+                        tracing::warn!(error = %e, "failed to upload weights to GPU");
+                    }
+                }
+            }
+        }
+        let _ = blocks;
+        None
+    }
+
+    fn gemv_cached(
+        &self,
+        handle: GpuWeightHandle,
+        input: &[f32],
+        output: &mut [f32],
+        n_rows: usize,
+        k: usize,
+    ) -> KernelResult<()> {
+        #[cfg(feature = "gpu")]
+        {
+            if let (KernelTier::Gpu, Some(ref backend)) = (self.tier, &self.gpu_backend) {
+                match backend.gemv_q1_g128_cached(handle, input, n_rows, k) {
+                    Ok(result) => {
+                        let len = output.len().min(result.len());
+                        output[..len].copy_from_slice(&result[..len]);
+                        return Ok(());
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "cached GPU gemv failed, cannot fallback without blocks");
+                        return Err(crate::error::KernelError::GpuError(e.to_string()));
+                    }
+                }
+            }
+        }
+        let _ = (handle, input, output, n_rows, k);
+        Err(crate::error::KernelError::UnsupportedOperation(
+            "gemv_cached requires GPU tier".into(),
+        ))
+    }
+
+    fn batch_attn_phase(
+        &self,
+        hidden: &[f32],
+        norm_weight: &[f32],
+        norm_eps: f32,
+        qkv_handle: GpuWeightHandle,
+        q_rows: usize,
+        k_rows: usize,
+        h: usize,
+    ) -> KernelResult<Option<(Vec<f32>, Vec<f32>, Vec<f32>)>> {
+        // Disabled: CPU RMSNorm + single fused GEMV is faster than
+        // GPU batch (dispatch_no_wait + dispatch) for only 2 operations.
+        // The GPU batch creates 4 new Metal buffers per call; the fallback
+        // reuses pre-allocated io_input/output buffers.
+        let _ = (hidden, norm_weight, norm_eps, qkv_handle, q_rows, k_rows, h);
+        Ok(None)
+    }
+
+    fn batch_ffn_phase(
+        &self,
+        hidden: &mut [f32],
+        attn_out: &[f32],
+        norm_weight: &[f32],
+        norm_eps: f32,
+        attn_proj_handle: GpuWeightHandle,
+        gate_up_handle: GpuWeightHandle,
+        down_handle: GpuWeightHandle,
+        h: usize,
+        intermediate: usize,
+        attn_proj_k: usize,
+    ) -> KernelResult<bool> {
+        #[cfg(feature = "gpu")]
+        {
+            if let (KernelTier::Gpu, Some(ref backend)) = (self.tier, &self.gpu_backend) {
+                match backend.batch_ffn_phase(
+                    hidden,
+                    attn_out,
+                    norm_weight,
+                    norm_eps,
+                    attn_proj_handle,
+                    gate_up_handle,
+                    down_handle,
+                    h,
+                    intermediate,
+                    attn_proj_k,
+                ) {
+                    Ok(true) => return Ok(true),
+                    Ok(false) => return Ok(false),
+                    Err(e) => {
+                        tracing::warn!(error = %e, "batch FFN phase failed, falling back");
+                        return Ok(false);
+                    }
+                }
+            }
+        }
+        let _ = (
+            hidden,
+            attn_out,
+            norm_weight,
+            norm_eps,
+            attn_proj_handle,
+            gate_up_handle,
+            down_handle,
+            h,
+            intermediate,
+            attn_proj_k,
+        );
+        Ok(false)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn auto_detect_creates_dispatcher() {
+        let dispatcher = KernelDispatcher::auto_detect();
+        // On x86-64 with AVX2, it should pick Avx2; otherwise Reference
+        let _tier = dispatcher.tier();
+        let _name = dispatcher.name();
+    }
+
+    #[test]
+    fn reference_tier_works() {
+        let dispatcher = KernelDispatcher::with_tier(KernelTier::Reference);
+        assert_eq!(dispatcher.tier(), KernelTier::Reference);
+        assert_eq!(dispatcher.name(), "Q1_0_g128 reference (scalar)");
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn avx2_tier_name() {
+        if !(is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma")) {
+            return;
+        }
+        let dispatcher = KernelDispatcher::with_tier(KernelTier::Avx2);
+        assert_eq!(dispatcher.tier(), KernelTier::Avx2);
+        assert_eq!(dispatcher.name(), "Q1_0_g128 AVX2+FMA (256-bit)");
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    #[test]
+    fn neon_tier_name() {
+        let dispatcher = KernelDispatcher::with_tier(KernelTier::Neon);
+        assert_eq!(dispatcher.tier(), KernelTier::Neon);
+        assert_eq!(dispatcher.name(), "Q1_0_g128 NEON (128-bit)");
+    }
+}

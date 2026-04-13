@@ -1,0 +1,21 @@
+[package]
+name = "oxibonsai-eval"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation = "https://docs.rs/oxibonsai-eval"
+description = "Model evaluation harness for OxiBonsai — perplexity, MMLU, benchmarks"
+keywords = ["evaluation", "llm", "benchmarks", "perplexity", "mmlu"]
+categories = ["science", "algorithms"]
+readme = "README.md"
+
+[dependencies]
+oxibonsai-core = { path = "../oxibonsai-core", version = "0.1.0" }
+oxibonsai-runtime = { path = "../oxibonsai-runtime", version = "0.1.0", default-features = false }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
