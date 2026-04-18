@@ -10,6 +10,7 @@ fn greedy_params() -> SamplingParams {
         top_k: 0,
         top_p: 1.0,
         repetition_penalty: 1.0,
+        max_tokens: 128,
     }
 }
 
@@ -69,6 +70,7 @@ fn temperature_1_samples_from_distribution() {
         top_k: 0,
         top_p: 1.0,
         repetition_penalty: 1.0,
+        max_tokens: 128,
     };
     let mut sampler = Sampler::new(params, 12345);
     // With a peaked distribution, most samples should be the max
@@ -99,6 +101,7 @@ fn top_k_1_always_returns_top_element() {
         top_k: 1,
         top_p: 1.0,
         repetition_penalty: 1.0,
+        max_tokens: 128,
     };
     let mut sampler = Sampler::new(params, 42);
     let logits = vec![0.1, 0.9, 0.5, 0.3];
@@ -116,6 +119,7 @@ fn top_k_reduces_candidate_set() {
         top_k: 2,
         top_p: 1.0,
         repetition_penalty: 1.0,
+        max_tokens: 128,
     };
     let mut sampler = Sampler::new(params, 42);
     // logits: indices 2 and 4 are the top 2
@@ -141,6 +145,7 @@ fn top_p_near_zero_returns_top_element() {
         top_k: 0,
         top_p: 0.01, // very small
         repetition_penalty: 1.0,
+        max_tokens: 128,
     };
     let mut sampler = Sampler::new(params, 42);
     let logits = vec![0.0, 0.0, 10.0, 0.0, 0.0];
@@ -158,6 +163,7 @@ fn top_p_1_considers_all_tokens() {
         top_k: 0,
         top_p: 1.0,
         repetition_penalty: 1.0,
+        max_tokens: 128,
     };
     let mut sampler = Sampler::new(params, 42);
     // Uniform logits
@@ -188,12 +194,14 @@ fn repetition_penalty_1_has_no_effect() {
         top_k: 0,
         top_p: 1.0,
         repetition_penalty: 1.0,
+        max_tokens: 128,
     };
     let params2 = SamplingParams {
         temperature: 0.0,
         top_k: 0,
         top_p: 1.0,
         repetition_penalty: 1.0,
+        max_tokens: 128,
     };
     let mut s1 = Sampler::new(params1, 42);
     let mut s2 = Sampler::new(params2, 42);
@@ -215,6 +223,7 @@ fn very_large_logits_no_overflow() {
         top_k: 0,
         top_p: 1.0,
         repetition_penalty: 1.0,
+        max_tokens: 128,
     };
     let mut sampler = Sampler::new(params, 42);
     let logits = vec![1000.0, 999.0, 998.0];
@@ -267,6 +276,7 @@ fn statistical_distribution_roughly_correct() {
         top_k: 0,
         top_p: 1.0,
         repetition_penalty: 1.0,
+        max_tokens: 128,
     };
     let mut sampler = Sampler::new(params, 42);
 
@@ -311,6 +321,7 @@ fn sampler_params_accessible() {
         top_k: 10,
         top_p: 0.8,
         repetition_penalty: 1.2,
+        max_tokens: 128,
     };
     let sampler = Sampler::new(params, 42);
     let p = sampler.params();

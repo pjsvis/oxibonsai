@@ -74,6 +74,7 @@ pub async fn extended_chat_completions(
         top_k: 40,
         top_p: req.top_p.unwrap_or(0.9),
         repetition_penalty: 1.1,
+        ..SamplingParams::default()
     };
 
     // Generate n completions

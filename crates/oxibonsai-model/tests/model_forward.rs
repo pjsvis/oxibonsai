@@ -20,8 +20,8 @@ fn make_blocks(n: usize, scale: f32, pattern: u8) -> Vec<BlockQ1_0G128> {
         .collect()
 }
 
-fn ref_kernel() -> KernelDispatcher {
-    KernelDispatcher::with_tier(KernelTier::Reference)
+fn ref_kernel() -> std::sync::Arc<KernelDispatcher> {
+    std::sync::Arc::new(KernelDispatcher::with_tier(KernelTier::Reference))
 }
 
 /// Build a small Transformer block for testing with given dimensions.
@@ -44,19 +44,34 @@ fn build_test_block<'a>(
     down_blocks: &'a [BlockQ1_0G128],
 ) -> TransformerBlock<'a> {
     let _ = (scale, pattern); // used indirectly through blocks
+    let kernel = ref_kernel();
     TransformerBlock::new(
         layer_idx,
         RmsNorm::new(vec![1.0; h], 1e-6),
-        Linear1Bit::new(q_blocks, nq * hd, h),
-        Linear1Bit::new(k_blocks, nkv * hd, h),
-        Linear1Bit::new(v_blocks, nkv * hd, h),
-        Linear1Bit::new(o_blocks, h, nq * hd),
+        Linear1Bit::new(q_blocks, nq * hd, h, kernel.clone())
+            .expect("q")
+            .into(),
+        Linear1Bit::new(k_blocks, nkv * hd, h, kernel.clone())
+            .expect("k")
+            .into(),
+        Linear1Bit::new(v_blocks, nkv * hd, h, kernel.clone())
+            .expect("v")
+            .into(),
+        Linear1Bit::new(o_blocks, h, nq * hd, kernel.clone())
+            .expect("o")
+            .into(),
         RmsNorm::new(vec![1.0; hd], 1e-6),
         RmsNorm::new(vec![1.0; hd], 1e-6),
         RmsNorm::new(vec![1.0; h], 1e-6),
-        Linear1Bit::new(gate_blocks, inter, h),
-        Linear1Bit::new(up_blocks, inter, h),
-        Linear1Bit::new(down_blocks, h, inter),
+        Linear1Bit::new(gate_blocks, inter, h, kernel.clone())
+            .expect("gate")
+            .into(),
+        Linear1Bit::new(up_blocks, inter, h, kernel.clone())
+            .expect("up")
+            .into(),
+        Linear1Bit::new(down_blocks, h, inter, kernel.clone())
+            .expect("down")
+            .into(),
         nq,
         nkv,
         hd,
@@ -110,7 +125,7 @@ fn model_forward_produces_logits_of_vocab_size() {
 
     // With 0 blocks, forward should still work (embedding + norm + output projection)
     let logits = model
-        .forward(0, 0, &kernel)
+        .forward(0, 0, kernel.as_ref())
         .expect("forward should succeed with empty blocks");
     assert_eq!(logits.len(), 100, "logits should match vocab_size");
 }
@@ -136,8 +151,8 @@ fn model_forward_deterministic() {
     let mut model2 = BonsaiModel::new(config);
     let kernel = ref_kernel();
 
-    let logits1 = model1.forward(0, 0, &kernel).expect("forward 1");
-    let logits2 = model2.forward(0, 0, &kernel).expect("forward 2");
+    let logits1 = model1.forward(0, 0, kernel.as_ref()).expect("forward 1");
+    let logits2 = model2.forward(0, 0, kernel.as_ref()).expect("forward 2");
 
     assert_eq!(logits1.len(), logits2.len());
     for (i, (a, b)) in logits1.iter().zip(logits2.iter()).enumerate() {
@@ -168,7 +183,7 @@ fn model_reset_clears_kv_cache() {
     let mut model = BonsaiModel::new(config);
     let kernel = ref_kernel();
 
-    let _ = model.forward(0, 0, &kernel).expect("forward");
+    let _ = model.forward(0, 0, kernel.as_ref()).expect("forward");
     model.reset();
     assert_eq!(model.kv_cache_mut().seq_len(), 0);
 }
@@ -220,7 +235,7 @@ fn transformer_block_forward_changes_hidden_state() {
     let original = hidden.clone();
 
     block
-        .forward(&mut hidden, 0, &mut kv_cache, &rope, &kernel)
+        .forward(&mut hidden, 0, &mut kv_cache, &rope, kernel.as_ref())
         .expect("block forward");
 
     let max_diff = hidden
@@ -279,7 +294,7 @@ fn transformer_block_residual_connection_preserves_input_contribution() {
     let original = hidden.clone();
 
     block
-        .forward(&mut hidden, 0, &mut kv_cache, &rope, &kernel)
+        .forward(&mut hidden, 0, &mut kv_cache, &rope, kernel.as_ref())
         .expect("block forward");
 
     // With very small weights, the residual contribution from input dominates
@@ -366,7 +381,7 @@ fn kv_cache_accumulates_across_forward_calls() {
     // Forward at position 0
     let mut hidden = vec![0.1f32; h];
     block
-        .forward(&mut hidden, 0, &mut kv_cache, &rope, &kernel)
+        .forward(&mut hidden, 0, &mut kv_cache, &rope, kernel.as_ref())
         .expect("pos 0");
 
     // Check that keys were stored at position 0
@@ -382,7 +397,7 @@ fn kv_cache_accumulates_across_forward_calls() {
     // Forward at position 1
     let mut hidden2 = vec![0.2f32; h];
     block
-        .forward(&mut hidden2, 1, &mut kv_cache, &rope, &kernel)
+        .forward(&mut hidden2, 1, &mut kv_cache, &rope, kernel.as_ref())
         .expect("pos 1");
 
     // Now KV cache should have 2 positions

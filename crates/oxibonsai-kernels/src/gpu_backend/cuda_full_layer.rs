@@ -31,15 +31,38 @@
     any(target_os = "linux", target_os = "windows")
 ))]
 
+use cudarc::driver::result as cudarc_result;
 use cudarc::driver::sys;
-use cudarc::driver::CudaGraph as CuDriverGraph;
-use cudarc::driver::{CudaFunction, CudaSlice, CudaView, LaunchConfig, PushKernelArg};
+use cudarc::driver::{CudaFunction, CudaSlice, CudaStream, CudaView, LaunchConfig, PushKernelArg};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
 use tracing::{debug, warn};
 
-// ─── CUDA Driver Graph wrapper (cudarc::driver::CudaGraph is not Send) ───────
-struct CuGraphHolder(CuDriverGraph);
+// ─── CUDA Driver Graph wrapper ────────────────────────────────────────────────
+// We bypass cudarc's end_capture() because its CUgraphInstantiate_flags enum
+// has no 0 variant, so passing "no flags" via transmute trips Rust's debug-mode
+// enum-validity check. Instead we hold the raw CUgraph + CUgraphExec handles.
+struct CuGraphHolder {
+    cu_graph: sys::CUgraph,
+    cu_graph_exec: sys::CUgraphExec,
+    stream: Arc<CudaStream>,
+}
+impl CuGraphHolder {
+    unsafe fn launch(&self) -> Result<(), cudarc::driver::DriverError> {
+        cudarc_result::graph::launch(self.cu_graph_exec, self.stream.cu_stream())
+    }
+    unsafe fn upload(&self) -> Result<(), cudarc::driver::DriverError> {
+        cudarc_result::graph::upload(self.cu_graph_exec, self.stream.cu_stream())
+    }
+}
+impl Drop for CuGraphHolder {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = cudarc_result::graph::exec_destroy(self.cu_graph_exec);
+            let _ = cudarc_result::graph::destroy(self.cu_graph);
+        }
+    }
+}
 // SAFETY: CUgraphExec is safe to send across threads when protected by a Mutex.
 // We never call into the graph from multiple threads concurrently.
 unsafe impl Send for CuGraphHolder {}
@@ -1622,9 +1645,7 @@ pub fn encode_full_forward(
             }
 
             // Submit the entire 36-layer kernel sequence as one driver call.
-            holder
-                .0
-                .launch()
+            unsafe { holder.launch() }
                 .map_err(|e| CudaGraphError::DriverError(format!("graph launch: {e}")))?;
 
             // Enqueue the D2H copy on the same stream — it is automatically
@@ -1774,21 +1795,53 @@ pub fn encode_full_forward(
 
                     // Must call end_capture whenever begin_capture succeeded.
                     // Leaving the stream in capture mode corrupts future ops.
-                    // SAFETY: 0 = "no special flags" for cuGraphInstantiateWithFlags.
-                    //         CUgraphInstantiate_flags is #[repr(u32)]; transmuting safe.
-                    let no_flags: sys::CUgraphInstantiate_flags =
-                        unsafe { core::mem::transmute(0u32) };
-                    match stream.end_capture(no_flags) {
-                        Ok(Some(cu_graph)) if record_ok => match cu_graph.upload() {
-                            Ok(()) => {
-                                **graph_guard = Some(Some(CuGraphHolder(cu_graph)));
-                                debug!("CUDA graph captured and uploaded successfully");
+                    // We call the raw cudarc result functions directly to pass 0 (no flags)
+                    // to cuGraphInstantiateWithFlags — the cudarc enum has no 0 variant so
+                    // we can't use stream.end_capture() without triggering a debug-mode
+                    // enum-validity panic.
+                    let end_result =
+                        unsafe { cudarc_result::stream::end_capture(stream.cu_stream()) };
+                    match end_result {
+                        Ok(cu_graph_raw) if !cu_graph_raw.is_null() && record_ok => {
+                            let inst_result = unsafe {
+                                let mut exec = std::mem::MaybeUninit::uninit();
+                                sys::cuGraphInstantiateWithFlags(
+                                    exec.as_mut_ptr(),
+                                    cu_graph_raw,
+                                    0u64,
+                                )
+                                .result()
+                                .map(|_| exec.assume_init())
+                            };
+                            match inst_result {
+                                Ok(cu_graph_exec) => {
+                                    let holder = CuGraphHolder {
+                                        cu_graph: cu_graph_raw,
+                                        cu_graph_exec,
+                                        stream: Arc::clone(&stream),
+                                    };
+                                    match unsafe { holder.upload() } {
+                                        Ok(()) => {
+                                            **graph_guard = Some(Some(holder));
+                                            debug!("CUDA graph captured and uploaded successfully");
+                                        }
+                                        Err(e) => {
+                                            warn!(
+                                                "CUDA graph upload failed: {e} — disabling replay"
+                                            );
+                                            **graph_guard = Some(None);
+                                        }
+                                    }
+                                }
+                                Err(e) => {
+                                    warn!("CUDA graph instantiate failed: {e} — disabling replay");
+                                    unsafe {
+                                        let _ = cudarc_result::graph::destroy(cu_graph_raw);
+                                    }
+                                    **graph_guard = Some(None);
+                                }
                             }
-                            Err(e) => {
-                                warn!("CUDA graph upload failed: {e} — disabling replay");
-                                **graph_guard = Some(None);
-                            }
-                        },
+                        }
                         Ok(_) => {
                             warn!("CUDA graph: end_capture returned no graph — disabling replay");
                             **graph_guard = Some(None);

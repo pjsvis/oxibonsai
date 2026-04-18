@@ -53,30 +53,35 @@ impl SamplingPreset {
                 top_k: 40,
                 top_p: 0.9,
                 repetition_penalty: 1.1,
+                ..SamplingParams::default()
             },
             Self::Creative => SamplingParams {
                 temperature: 1.0,
                 top_k: 0,
                 top_p: 0.95,
                 repetition_penalty: 1.0,
+                ..SamplingParams::default()
             },
             Self::Precise => SamplingParams {
                 temperature: 0.1,
                 top_k: 10,
                 top_p: 0.5,
                 repetition_penalty: 1.2,
+                ..SamplingParams::default()
             },
             Self::Greedy => SamplingParams {
                 temperature: 0.0,
                 top_k: 0,
                 top_p: 1.0,
                 repetition_penalty: 1.0,
+                ..SamplingParams::default()
             },
             Self::Conversational => SamplingParams {
                 temperature: 0.8,
                 top_k: 50,
                 top_p: 0.9,
                 repetition_penalty: 1.1,
+                ..SamplingParams::default()
             },
         }
     }

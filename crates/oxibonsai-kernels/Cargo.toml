@@ -39,10 +39,15 @@ rayon.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
 metal = { workspace = true, optional = true }
-objc = { version = "0.2", optional = true }
+objc = { workspace = true, optional = true }
 
 [dev-dependencies]
+criterion.workspace = true
 proptest.workspace = true
+
+[[bench]]
+name = "kernel_benchmarks"
+harness = false
 
 [[example]]
 name = "gemv_benchmark"

@@ -34,8 +34,8 @@ wasm = [
 oxibonsai-core.workspace = true
 oxibonsai-kernels.workspace = true
 oxibonsai-model.workspace = true
-oxibonsai-runtime = { path = "../oxibonsai-runtime", version = "0.1.0", default-features = false }
-oxibonsai-rag = { path = "../oxibonsai-rag", version = "0.1.0", optional = true }
-oxibonsai-eval = { path = "../oxibonsai-eval", version = "0.1.0", optional = true }
-oxibonsai-tokenizer = { path = "../oxibonsai-tokenizer", version = "0.1.0", optional = true }
-oxibonsai-serve = { path = "../oxibonsai-serve", version = "0.1.0", optional = true }
+oxibonsai-runtime = { workspace = true, default-features = false }
+oxibonsai-rag = { workspace = true, optional = true }
+oxibonsai-eval = { workspace = true, optional = true }
+oxibonsai-tokenizer = { workspace = true, optional = true }
+oxibonsai-serve = { workspace = true, optional = true }

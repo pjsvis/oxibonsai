@@ -205,12 +205,104 @@ pub fn bonsai_1_7b_spec() -> ModelSpec {
     }
 }
 
-/// Return a static slice containing specs for all three known variants,
-/// ordered from largest (8B) to smallest (1.7B).
+/// Build the [`ModelSpec`] for Ternary-Bonsai-8B (Qwen3-8B architecture, TQ2_0_g128 weights).
+///
+/// Architecture is identical to Bonsai-8B; only the weight storage format differs.
+pub fn ternary_bonsai_8b_spec() -> ModelSpec {
+    let config = Qwen3Config::ternary_bonsai_8b();
+    let param_count: u64 = 8_030_000_000;
+
+    // TQ2_0_g128: 34 bytes per 128 weights ≈ 0.266 bytes/param.
+    // Transformer weights only (excl. embedding/output ~1.24B params):
+    //   ~6.8B × 0.266 ≈ 1.81 GB
+    // Embedding (FP16): 151936 × 4096 × 2 ≈ 1.24 GB  (output head tied/same)
+    // Norms (FP32): negligible
+    // Weighted sum with ternary transformer weights → ~1.75 GB
+    let weights_size_bytes: u64 = 1_750_000_000;
+    let kv_cache_4k_bytes: u64 = kv_cache_size_bytes(&config, 4096);
+    let min_ram_bytes = weights_size_bytes + kv_cache_4k_bytes + 64 * 1024 * 1024;
+
+    ModelSpec {
+        name: "Ternary-Bonsai-8B",
+        variant: ModelVariant::TernaryBonsai8B,
+        config,
+        param_count,
+        weights_size_bytes,
+        kv_cache_4k_bytes,
+        min_ram_bytes,
+        description: "Ternary-Bonsai-8B uses the same Qwen3-8B architecture as Bonsai-8B, \
+            but stores transformer weights in TQ2_0_g128 ternary format ({-1,0,+1}). \
+            Approximately 0.266 bytes/weight versus 0.14 bytes/weight for the 1-bit variant, \
+            trading a small size increase for ternary expressivity.",
+    }
+}
+
+/// Build the [`ModelSpec`] for Ternary-Bonsai-4B (Qwen3-4B architecture, TQ2_0_g128 weights).
+pub fn ternary_bonsai_4b_spec() -> ModelSpec {
+    let config = Qwen3Config::ternary_bonsai_4b();
+    let param_count: u64 = 4_020_000_000;
+
+    // ~3.63B transformer params × 0.266 ≈ 0.97 GB
+    // Embedding FP16: 151936 × 2560 × 2 ≈ 0.78 GB (output head same)
+    // Total → ~0.90 GB
+    let weights_size_bytes: u64 = 900_000_000;
+    let kv_cache_4k_bytes: u64 = kv_cache_size_bytes(&config, 4096);
+    let min_ram_bytes = weights_size_bytes + kv_cache_4k_bytes + 48 * 1024 * 1024;
+
+    ModelSpec {
+        name: "Ternary-Bonsai-4B",
+        variant: ModelVariant::TernaryBonsai4B,
+        config,
+        param_count,
+        weights_size_bytes,
+        kv_cache_4k_bytes,
+        min_ram_bytes,
+        description: "Ternary-Bonsai-4B uses the same Qwen3-4B architecture as Bonsai-4B, \
+            but stores transformer weights in TQ2_0_g128 ternary format ({-1,0,+1}).",
+    }
+}
+
+/// Build the [`ModelSpec`] for Ternary-Bonsai-1.7B (Qwen3-1.7B architecture, TQ2_0_g128 weights).
+pub fn ternary_bonsai_1_7b_spec() -> ModelSpec {
+    let config = Qwen3Config::ternary_bonsai_1_7b();
+    let param_count: u64 = 1_720_000_000;
+
+    // ~1.49B transformer params × 0.266 ≈ 0.40 GB
+    // Embedding FP16: 151936 × 1536 × 2 ≈ 0.47 GB (output head same)
+    // Total → ~0.39 GB
+    let weights_size_bytes: u64 = 390_000_000;
+    let kv_cache_4k_bytes: u64 = kv_cache_size_bytes(&config, 4096);
+    let min_ram_bytes = weights_size_bytes + kv_cache_4k_bytes + 32 * 1024 * 1024;
+
+    ModelSpec {
+        name: "Ternary-Bonsai-1.7B",
+        variant: ModelVariant::TernaryBonsai1_7B,
+        config,
+        param_count,
+        weights_size_bytes,
+        kv_cache_4k_bytes,
+        min_ram_bytes,
+        description: "Ternary-Bonsai-1.7B uses the same Qwen3-1.7B architecture as Bonsai-1.7B, \
+            but stores transformer weights in TQ2_0_g128 ternary format ({-1,0,+1}). \
+            Designed for resource-constrained environments where ternary weights are preferred.",
+    }
+}
+
+/// Return a static slice containing specs for all six known variants,
+/// ordered from largest (8B) to smallest (1.7B), 1-bit variants first then ternary.
 pub fn all_specs() -> &'static [ModelSpec] {
     use std::sync::OnceLock;
-    static SPECS: OnceLock<[ModelSpec; 3]> = OnceLock::new();
-    SPECS.get_or_init(|| [bonsai_8b_spec(), bonsai_4b_spec(), bonsai_1_7b_spec()])
+    static SPECS: OnceLock<[ModelSpec; 6]> = OnceLock::new();
+    SPECS.get_or_init(|| {
+        [
+            bonsai_8b_spec(),
+            bonsai_4b_spec(),
+            bonsai_1_7b_spec(),
+            ternary_bonsai_8b_spec(),
+            ternary_bonsai_4b_spec(),
+            ternary_bonsai_1_7b_spec(),
+        ]
+    })
 }
 
 /// Return the spec for a specific [`ModelVariant`], or `None` for `Custom`.
@@ -336,6 +428,54 @@ pub fn capability_profile(v: ModelVariant) -> CapabilityProfile {
                 "WASM browser deployment",
             ],
         },
+        ModelVariant::TernaryBonsai8B => CapabilityProfile {
+            max_context_len: 65536,
+            supports_system_prompt: true,
+            supports_streaming: true,
+            recommended_temperature: 0.7,
+            recommended_top_p: 0.9,
+            languages: LANGUAGES,
+            use_cases: &[
+                "Long-document summarisation (ternary weights)",
+                "Complex multi-turn dialogue",
+                "Code generation and debugging",
+                "Structured data extraction",
+                "Creative writing and story-telling",
+                "Multilingual translation",
+                "Retrieval-augmented generation (RAG)",
+            ],
+        },
+        ModelVariant::TernaryBonsai4B => CapabilityProfile {
+            max_context_len: 65536,
+            supports_system_prompt: true,
+            supports_streaming: true,
+            recommended_temperature: 0.72,
+            recommended_top_p: 0.9,
+            languages: LANGUAGES,
+            use_cases: &[
+                "Short-to-medium document summarisation (ternary weights)",
+                "Conversational chat assistants",
+                "Code completion and review",
+                "Data extraction and classification",
+                "On-device inference with moderate hardware",
+            ],
+        },
+        ModelVariant::TernaryBonsai1_7B => CapabilityProfile {
+            max_context_len: 65536,
+            supports_system_prompt: true,
+            supports_streaming: true,
+            recommended_temperature: 0.75,
+            recommended_top_p: 0.85,
+            languages: LANGUAGES,
+            use_cases: &[
+                "Edge / IoT on-device inference (ternary weights)",
+                "Low-latency chatbot responses",
+                "Simple Q&A over short documents",
+                "Keyword extraction",
+                "Fast text classification",
+                "WASM browser deployment",
+            ],
+        },
         ModelVariant::Custom => CapabilityProfile {
             max_context_len: 65536,
             supports_system_prompt: true,
@@ -356,11 +496,14 @@ mod tests {
 
     // ── helper ───────────────────────────────────────────────────────────────
 
-    fn all_known_variants() -> [ModelVariant; 3] {
+    fn all_known_variants() -> [ModelVariant; 6] {
         [
             ModelVariant::Bonsai8B,
             ModelVariant::Bonsai4B,
             ModelVariant::Bonsai1_7B,
+            ModelVariant::TernaryBonsai8B,
+            ModelVariant::TernaryBonsai4B,
+            ModelVariant::TernaryBonsai1_7B,
         ]
     }
 
@@ -539,8 +682,8 @@ mod tests {
     // ── all_specs / spec_for_variant ─────────────────────────────────────────
 
     #[test]
-    fn all_specs_returns_three_entries() {
-        assert_eq!(all_specs().len(), 3);
+    fn all_specs_returns_six_entries() {
+        assert_eq!(all_specs().len(), 6);
     }
 
     #[test]

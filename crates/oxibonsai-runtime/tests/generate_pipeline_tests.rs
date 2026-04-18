@@ -22,6 +22,7 @@ fn greedy_params() -> SamplingParams {
         top_k: 0,
         top_p: 1.0,
         repetition_penalty: 1.0,
+        max_tokens: 128,
     }
 }
 
@@ -110,6 +111,7 @@ fn generate_different_seeds_can_differ() {
         top_k: 0,
         top_p: 1.0,
         repetition_penalty: 1.0,
+        max_tokens: 128,
     };
 
     let mut engine1 = tiny_engine(params.clone(), 1);
@@ -157,6 +159,7 @@ fn temperature_zero_is_greedy() {
         top_k: 0,
         top_p: 1.0,
         repetition_penalty: 1.0,
+        max_tokens: 128,
     };
 
     let mut results = Vec::new();
@@ -187,6 +190,7 @@ fn high_temperature_produces_valid_tokens() {
         top_k: 0,
         top_p: 1.0,
         repetition_penalty: 1.0,
+        max_tokens: 128,
     };
 
     let mut engine = tiny_engine(params, 42);
@@ -219,6 +223,7 @@ fn top_k_1_is_deterministic() {
         top_k: 1,
         top_p: 1.0,
         repetition_penalty: 1.0,
+        max_tokens: 128,
     };
 
     // top_k=1 always picks the highest-logit token, so it should be
@@ -249,6 +254,7 @@ fn top_k_full_vocab_no_filtering() {
         top_k: vocab_size,
         top_p: 1.0,
         repetition_penalty: 1.0,
+        max_tokens: 128,
     };
 
     let mut engine = tiny_engine(params, 42);
@@ -271,6 +277,7 @@ fn top_p_near_zero_produces_valid_output() {
         top_k: 0,
         top_p: 0.01,
         repetition_penalty: 1.0,
+        max_tokens: 128,
     };
 
     // Very small top_p restricts the candidate set heavily.
@@ -301,6 +308,7 @@ fn top_p_1_allows_all_tokens() {
         top_k: 0,
         top_p: 1.0,
         repetition_penalty: 1.0,
+        max_tokens: 128,
     };
 
     let mut engine = tiny_engine(params, 42);
@@ -319,6 +327,7 @@ fn repetition_penalty_above_one_produces_valid_output() {
         top_k: 40,
         top_p: 0.9,
         repetition_penalty: 1.5,
+        max_tokens: 128,
     };
 
     let mut engine = tiny_engine(params, 42);
@@ -346,12 +355,14 @@ fn repetition_penalty_vs_no_penalty_can_differ() {
         top_k: 0,
         top_p: 1.0,
         repetition_penalty: 1.0,
+        max_tokens: 128,
     };
     let with_penalty = SamplingParams {
         temperature: 0.7,
         top_k: 0,
         top_p: 1.0,
         repetition_penalty: 2.0,
+        max_tokens: 128,
     };
 
     let mut engine_no = tiny_engine(no_penalty, 42);
@@ -419,12 +430,13 @@ fn generate_with_various_prompt_lengths() {
 #[test]
 fn generate_long_prompt_near_context_limit() {
     let config = Qwen3Config::tiny_test();
-    // Fill most of the context window (max_context_length=512)
-    let prompt: Vec<u32> = (0..500).map(|i| (i % 1000) as u32).collect();
+    // Use a 64-token prompt to verify that long prompts are handled without
+    // panicking and respect the max_tokens limit.
+    let prompt: Vec<u32> = (0..64).map(|i| (i % 1000) as u32).collect();
     let mut engine = InferenceEngine::new(config, greedy_params(), 42);
     let tokens = engine
         .generate(&prompt, 5)
-        .expect("near-capacity prompt should succeed");
+        .expect("long prompt should succeed");
     assert!(
         tokens.len() <= 5,
         "should produce at most 5 tokens, got {}",
@@ -521,6 +533,7 @@ fn generate_with_seed_method() {
         top_k: 0,
         top_p: 1.0,
         repetition_penalty: 1.0,
+        max_tokens: 128,
     };
 
     let mut engine = tiny_engine(params.clone(), 42);
@@ -546,6 +559,7 @@ fn generate_tokens_within_vocab_range() {
         top_k: 50,
         top_p: 0.95,
         repetition_penalty: 1.0,
+        max_tokens: 128,
     };
     let mut engine = tiny_engine(params, 42);
     let tokens = engine

@@ -1,5 +1,9 @@
 # oxibonsai-rag
 
+[![Version](https://img.shields.io/badge/version-0.1.1-blue)](https://crates.io/crates/oxibonsai-rag)
+[![Status](https://img.shields.io/badge/status-alpha-orange)](https://github.com/cool-japan/oxibonsai)
+[![Tests](https://img.shields.io/badge/tests-58_passing-brightgreen)](https://github.com/cool-japan/oxibonsai)
+
 Pure Rust Retrieval-Augmented Generation (RAG) pipeline for OxiBonsai.
 
 Self-contained RAG stack: document chunking (character, sentence, paragraph,
@@ -8,6 +12,10 @@ semantic, hierarchical, sliding window, markdown), pure Rust embedders
 retrieval, and end-to-end prompt-building pipeline.
 
 Part of the [OxiBonsai](https://github.com/cool-japan/oxibonsai) project.
+
+## Status
+
+**Alpha** — version 0.1.1, 58 tests passing (`cargo nextest run -p oxibonsai-rag`).
 
 ## Features
 
@@ -26,7 +34,7 @@ Part of the [OxiBonsai](https://github.com/cool-japan/oxibonsai) project.
 
 ```toml
 [dependencies]
-oxibonsai-rag = "0.1.0"
+oxibonsai-rag = "0.1.1"
 ```
 
 ```rust

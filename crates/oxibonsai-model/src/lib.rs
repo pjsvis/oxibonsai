@@ -28,6 +28,7 @@ pub mod calibration;
 pub mod checkpoint;
 pub mod chunked_prefill;
 pub mod compression;
+pub mod convert;
 pub mod disk_cache;
 pub mod dynamic_quant;
 pub mod error;
@@ -56,6 +57,7 @@ pub mod prefix_cache;
 pub mod pruning;
 pub mod quantize;
 pub mod quantize_int8;
+pub mod quantize_ternary;
 pub mod tensor_parallel;
 pub mod weight_tying;
 

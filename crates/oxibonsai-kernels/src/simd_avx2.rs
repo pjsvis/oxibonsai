@@ -262,6 +262,25 @@ unsafe fn hsum_avx2(v: __m256) -> f32 {
     _mm_cvtss_f32(result)
 }
 
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+#[inline]
+unsafe fn decode_2bytes_avx2_to_f32x8(b0: u8, b1: u8) -> __m256 {
+    let shifts = _mm256_setr_epi32(0, 2, 4, 6, 8, 10, 12, 14);
+    let one = _mm256_set1_epi32(1);
+    let mask3 = _mm256_set1_epi32(3);
+    let packed = _mm256_set1_epi32(((b0 as u32) | ((b1 as u32) << 8)) as i32);
+    let shifted = _mm256_srlv_epi32(packed, shifts);
+    let idx = _mm256_and_si256(shifted, mask3);
+    let pos_part = _mm256_srli_epi32(idx, 1);
+    let min_part = _mm256_min_epu32(idx, one);
+    let neg_part = _mm256_sub_epi32(one, min_part);
+    let val_i = _mm256_sub_epi32(pos_part, neg_part);
+    let reserved = _mm256_cmpeq_epi32(idx, mask3);
+    let val_i = _mm256_andnot_si256(reserved, val_i);
+    _mm256_cvtepi32_ps(val_i)
+}
+
 // ─── Prefetch-optimized AVX2 GEMV ───────────────────────────────────────
 
 /// AVX2-accelerated 1-bit GEMV with software prefetch hints.
@@ -392,6 +411,91 @@ pub unsafe fn gemv_1bit_g128_avx2_prefetch(
     Ok(())
 }
 
+/// AVX2-accelerated GEMV for TQ2\_0\_g128 with prefetch and 2-byte unroll.
+///
+/// # Safety
+/// Requires AVX2+FMA CPU support.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2", enable = "fma")]
+pub unsafe fn gemv_tq2_0_g128_avx2_prefetch(
+    blocks: &[oxibonsai_core::BlockTQ2_0_g128],
+    input: &[f32],
+    output: &mut [f32],
+    n_rows: usize,
+    k: usize,
+) -> KernelResult<()> {
+    use oxibonsai_core::QK_TQ2_0_G128;
+
+    if k % QK_TQ2_0_G128 != 0 {
+        return Err(KernelError::NotBlockAligned {
+            count: k,
+            block_size: QK_TQ2_0_G128,
+        });
+    }
+    if input.len() < k {
+        return Err(KernelError::DimensionMismatch {
+            expected: k,
+            got: input.len(),
+        });
+    }
+    if output.len() < n_rows {
+        return Err(KernelError::BufferTooSmall {
+            needed: n_rows,
+            available: output.len(),
+        });
+    }
+
+    let blocks_per_row = k / QK_TQ2_0_G128;
+    let expected_blocks = n_rows * blocks_per_row;
+    if blocks.len() < expected_blocks {
+        return Err(KernelError::BufferTooSmall {
+            needed: expected_blocks,
+            available: blocks.len(),
+        });
+    }
+
+    for (row, out) in output.iter_mut().enumerate().take(n_rows) {
+        let row_offset = row * blocks_per_row;
+
+        if row + 1 < n_rows {
+            let next_ptr = blocks.as_ptr().add((row + 1) * blocks_per_row) as *const i8;
+            _mm_prefetch(next_ptr, _MM_HINT_T0);
+        }
+
+        let mut row_sum = 0.0f32;
+        for block_idx in 0..blocks_per_row {
+            if block_idx + 1 < blocks_per_row {
+                let next_ptr = blocks.as_ptr().add(row_offset + block_idx + 1) as *const i8;
+                _mm_prefetch(next_ptr, _MM_HINT_T0);
+            }
+
+            let block = &blocks[row_offset + block_idx];
+            let d = block.d.to_f32();
+            let inp_base = block_idx * QK_TQ2_0_G128;
+            let mut acc0 = _mm256_setzero_ps();
+            let mut acc1 = _mm256_setzero_ps();
+
+            for pair in 0..8 {
+                let base = pair * 4;
+
+                let val0 = decode_2bytes_avx2_to_f32x8(block.qs[base], block.qs[base + 1]);
+                let inp0 = _mm256_loadu_ps(input.as_ptr().add(inp_base + pair * 16));
+                acc0 = _mm256_fmadd_ps(val0, inp0, acc0);
+
+                let val1 = decode_2bytes_avx2_to_f32x8(block.qs[base + 2], block.qs[base + 3]);
+                let inp1 = _mm256_loadu_ps(input.as_ptr().add(inp_base + pair * 16 + 8));
+                acc1 = _mm256_fmadd_ps(val1, inp1, acc1);
+            }
+
+            row_sum += d * hsum_avx2(_mm256_add_ps(acc0, acc1));
+        }
+
+        *out = row_sum;
+    }
+
+    Ok(())
+}
+
 /// AVX2-accelerated 1-bit GEMM with prefetch hints.
 ///
 /// # Safety
@@ -499,6 +603,271 @@ pub unsafe fn gemm_1bit_g128_avx2_prefetch(
 
             let combined = _mm256_add_ps(acc0, acc1);
             output[mi * n_rows + ni] = hsum_avx2(combined);
+        }
+    }
+
+    Ok(())
+}
+
+// ─── AVX2 Ternary TQ2_0_g128 Kernels ────────────────────────────────────
+
+/// AVX2-accelerated dequantization of TQ2\_0\_g128 blocks to FP32.
+///
+/// Decodes 2-bit ternary codes (4 per byte, 32 bytes per block = 128 weights)
+/// and scales by the block's FP16 scale factor.
+///
+/// Uses pure SIMD arithmetic decode: packs 2 bytes into a broadcast i32,
+/// extracts each 2-bit code via variable shifts, then computes
+/// `val = (idx >> 1) - (1 - min(idx, 1))` giving -1/0/+1 without branches.
+///
+/// # Safety
+/// Requires AVX2+FMA CPU support.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2", enable = "fma")]
+pub unsafe fn dequant_tq2_0_g128_avx2(
+    blocks: &[oxibonsai_core::BlockTQ2_0_g128],
+    output: &mut [f32],
+) -> KernelResult<()> {
+    use oxibonsai_core::QK_TQ2_0_G128;
+    let needed = blocks.len() * QK_TQ2_0_G128;
+    if output.len() < needed {
+        return Err(KernelError::BufferTooSmall {
+            needed,
+            available: output.len(),
+        });
+    }
+
+    // Hoist loop-invariant SIMD constants outside all loops
+    let one = _mm256_set1_epi32(1);
+    let shifts = _mm256_setr_epi32(0, 2, 4, 6, 8, 10, 12, 14);
+    let mask3 = _mm256_set1_epi32(3);
+
+    for (bi, block) in blocks.iter().enumerate() {
+        let d = block.d.to_f32();
+        let scale = _mm256_set1_ps(d);
+        let base = bi * QK_TQ2_0_G128;
+
+        // 32 bytes × 4 weights = 128 weights; process 2 bytes (8 weights) per AVX2 iteration
+        // 16 iterations per block
+        for chunk in 0..16 {
+            let b0 = block.qs[chunk * 2];
+            let b1 = block.qs[chunk * 2 + 1];
+
+            // Pack both bytes into low 16 bits of u32, then broadcast to all lanes
+            let bb = (b0 as u32) | ((b1 as u32) << 8);
+            let packed = _mm256_set1_epi32(bb as i32);
+
+            // Per-lane variable shifts to extract each 2-bit code
+            let shifted = _mm256_srlv_epi32(packed, shifts);
+            let idx = _mm256_and_si256(shifted, mask3);
+
+            // Arithmetic decode: val = (idx >> 1) - (1 - min(idx, 1))
+            // idx=0 → -1;  idx=1 → 0;  idx=2 → +1
+            let pos_part = _mm256_srli_epi32(idx, 1);
+            let min_part = _mm256_min_epu32(idx, one);
+            let neg_part = _mm256_sub_epi32(one, min_part);
+            let val_i = _mm256_sub_epi32(pos_part, neg_part);
+            let val_f = _mm256_cvtepi32_ps(val_i);
+
+            let result = _mm256_mul_ps(scale, val_f);
+            _mm256_storeu_ps(output.as_mut_ptr().add(base + chunk * 8), result);
+        }
+    }
+
+    Ok(())
+}
+
+/// AVX2-accelerated GEMV for TQ2\_0\_g128-quantized weight matrices.
+///
+/// Computes `output[row] = dot(weight_row, input)` for each row.
+/// Uses pure SIMD arithmetic decode: packs 2 bytes into a broadcast i32,
+/// extracts each 2-bit code via variable shifts, then computes
+/// `val = (idx >> 1) - (1 - min(idx, 1))` giving -1/0/+1 without branches.
+///
+/// # Safety
+/// Requires AVX2+FMA CPU support.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2", enable = "fma")]
+pub unsafe fn gemv_tq2_0_g128_avx2(
+    blocks: &[oxibonsai_core::BlockTQ2_0_g128],
+    input: &[f32],
+    output: &mut [f32],
+    n_rows: usize,
+    k: usize,
+) -> KernelResult<()> {
+    use oxibonsai_core::QK_TQ2_0_G128;
+
+    if k % QK_TQ2_0_G128 != 0 {
+        return Err(KernelError::NotBlockAligned {
+            count: k,
+            block_size: QK_TQ2_0_G128,
+        });
+    }
+    if input.len() < k {
+        return Err(KernelError::DimensionMismatch {
+            expected: k,
+            got: input.len(),
+        });
+    }
+    if output.len() < n_rows {
+        return Err(KernelError::BufferTooSmall {
+            needed: n_rows,
+            available: output.len(),
+        });
+    }
+
+    let blocks_per_row = k / QK_TQ2_0_G128;
+    let expected_blocks = n_rows * blocks_per_row;
+    if blocks.len() < expected_blocks {
+        return Err(KernelError::BufferTooSmall {
+            needed: expected_blocks,
+            available: blocks.len(),
+        });
+    }
+
+    // Hoist loop-invariant SIMD constants outside all loops
+    let one = _mm256_set1_epi32(1);
+    let shifts = _mm256_setr_epi32(0, 2, 4, 6, 8, 10, 12, 14);
+    let mask3 = _mm256_set1_epi32(3);
+
+    for row in 0..n_rows {
+        let row_blocks = &blocks[row * blocks_per_row..(row + 1) * blocks_per_row];
+        let mut row_sum = 0.0_f32;
+
+        for (bi, block) in row_blocks.iter().enumerate() {
+            let d = block.d.to_f32();
+            let inp_base = bi * QK_TQ2_0_G128;
+            let mut block_acc = _mm256_setzero_ps();
+
+            // 16 iterations × 8 weights = 128 weights per block
+            // Each iteration consumes 2 bytes of qs
+            for chunk in 0..16 {
+                let b0 = block.qs[chunk * 2];
+                let b1 = block.qs[chunk * 2 + 1];
+
+                // Pack both bytes into low 16 bits of u32, then broadcast to all lanes
+                let bb = (b0 as u32) | ((b1 as u32) << 8);
+                let packed = _mm256_set1_epi32(bb as i32);
+
+                // Per-lane variable shifts to extract each 2-bit code
+                let shifted = _mm256_srlv_epi32(packed, shifts);
+                let idx = _mm256_and_si256(shifted, mask3);
+
+                // Arithmetic decode: val = (idx >> 1) - (1 - min(idx, 1))
+                let pos_part = _mm256_srli_epi32(idx, 1);
+                let min_part = _mm256_min_epu32(idx, one);
+                let neg_part = _mm256_sub_epi32(one, min_part);
+                let val_i = _mm256_sub_epi32(pos_part, neg_part);
+                let val_f = _mm256_cvtepi32_ps(val_i);
+
+                let inp_vec = _mm256_loadu_ps(input.as_ptr().add(inp_base + chunk * 8));
+                block_acc = _mm256_fmadd_ps(val_f, inp_vec, block_acc);
+            }
+
+            row_sum += d * hsum_avx2(block_acc);
+        }
+
+        output[row] = row_sum;
+    }
+
+    Ok(())
+}
+
+/// AVX2-accelerated GEMM for TQ2\_0\_g128-quantized weight matrices.
+///
+/// Computes `output[m, n] = sum_k(weight[n, k] * input[m, k])` for each (m, n) pair.
+/// Iterates over batch dimension `m`, using per-row GEMV logic with pure SIMD decode.
+///
+/// Uses pure SIMD arithmetic decode: packs 2 bytes into a broadcast i32,
+/// extracts each 2-bit code via variable shifts, then computes
+/// `val = (idx >> 1) - (1 - min(idx, 1))` giving -1/0/+1 without branches.
+///
+/// # Safety
+/// Requires AVX2+FMA CPU support.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2", enable = "fma")]
+pub unsafe fn gemm_tq2_0_g128_avx2(
+    blocks: &[oxibonsai_core::BlockTQ2_0_g128],
+    input: &[f32],
+    output: &mut [f32],
+    m: usize,
+    n_rows: usize,
+    k: usize,
+) -> KernelResult<()> {
+    use oxibonsai_core::QK_TQ2_0_G128;
+
+    if k % QK_TQ2_0_G128 != 0 {
+        return Err(KernelError::NotBlockAligned {
+            count: k,
+            block_size: QK_TQ2_0_G128,
+        });
+    }
+    if input.len() < m * k {
+        return Err(KernelError::DimensionMismatch {
+            expected: m * k,
+            got: input.len(),
+        });
+    }
+    if output.len() < m * n_rows {
+        return Err(KernelError::BufferTooSmall {
+            needed: m * n_rows,
+            available: output.len(),
+        });
+    }
+
+    let blocks_per_row = k / QK_TQ2_0_G128;
+    let expected_blocks = n_rows * blocks_per_row;
+    if blocks.len() < expected_blocks {
+        return Err(KernelError::BufferTooSmall {
+            needed: expected_blocks,
+            available: blocks.len(),
+        });
+    }
+
+    // Hoist loop-invariant SIMD constants outside all loops
+    let one = _mm256_set1_epi32(1);
+    let shifts = _mm256_setr_epi32(0, 2, 4, 6, 8, 10, 12, 14);
+    let mask3 = _mm256_set1_epi32(3);
+
+    for mi in 0..m {
+        let input_row = &input[mi * k..];
+
+        for ni in 0..n_rows {
+            let row_blocks = &blocks[ni * blocks_per_row..(ni + 1) * blocks_per_row];
+            let mut row_sum = 0.0_f32;
+
+            for (bi, block) in row_blocks.iter().enumerate() {
+                let d = block.d.to_f32();
+                let inp_base = bi * QK_TQ2_0_G128;
+                let mut block_acc = _mm256_setzero_ps();
+
+                for chunk in 0..16 {
+                    let b0 = block.qs[chunk * 2];
+                    let b1 = block.qs[chunk * 2 + 1];
+
+                    // Pack both bytes into low 16 bits of u32, then broadcast to all lanes
+                    let bb = (b0 as u32) | ((b1 as u32) << 8);
+                    let packed = _mm256_set1_epi32(bb as i32);
+
+                    // Per-lane variable shifts to extract each 2-bit code
+                    let shifted = _mm256_srlv_epi32(packed, shifts);
+                    let idx = _mm256_and_si256(shifted, mask3);
+
+                    // Arithmetic decode: val = (idx >> 1) - (1 - min(idx, 1))
+                    let pos_part = _mm256_srli_epi32(idx, 1);
+                    let min_part = _mm256_min_epu32(idx, one);
+                    let neg_part = _mm256_sub_epi32(one, min_part);
+                    let val_i = _mm256_sub_epi32(pos_part, neg_part);
+                    let val_f = _mm256_cvtepi32_ps(val_i);
+
+                    let inp_vec = _mm256_loadu_ps(input_row.as_ptr().add(inp_base + chunk * 8));
+                    block_acc = _mm256_fmadd_ps(val_f, inp_vec, block_acc);
+                }
+
+                row_sum += d * hsum_avx2(block_acc);
+            }
+
+            output[mi * n_rows + ni] = row_sum;
         }
     }
 
@@ -671,5 +1040,144 @@ mod tests {
                 out_avx[i]
             );
         }
+    }
+
+    // ─── Ternary TQ2_0_g128 AVX2 tests ───────────────────────────────────
+
+    fn make_ternary_block(scale: f32, qs: [u8; 32]) -> oxibonsai_core::BlockTQ2_0_g128 {
+        oxibonsai_core::BlockTQ2_0_g128 {
+            qs,
+            d: f16::from_f32(scale),
+        }
+    }
+
+    /// qs=0xAA → all codes=0b10 (Pos=+1), d=1.0, input=[1.0;128] → output=[128.0;2]
+    #[test]
+    fn ternary_gemv_avx2_matches_scalar() {
+        if !has_avx2() {
+            return;
+        }
+        // 0xAA = 0b10_10_10_10: all 4 codes per byte = 0b10 (Pos = +1)
+        let blocks = vec![
+            make_ternary_block(1.0, [0xAA; 32]),
+            make_ternary_block(1.0, [0xAA; 32]),
+        ];
+        let input = vec![1.0_f32; 128];
+        let mut out_avx = vec![0.0_f32; 2];
+        let mut out_ref = vec![0.0_f32; 2];
+
+        crate::gemv_ternary::gemv_tq2_0_g128(&blocks, &input, &mut out_ref, 2, 128)
+            .expect("reference gemv should succeed");
+        unsafe {
+            gemv_tq2_0_g128_avx2(&blocks, &input, &mut out_avx, 2, 128)
+                .expect("avx2 ternary gemv should succeed");
+        }
+
+        for i in 0..2 {
+            assert!(
+                (out_avx[i] - out_ref[i]).abs() < 1e-4,
+                "row {i}: avx2={}, ref={}",
+                out_avx[i],
+                out_ref[i]
+            );
+        }
+    }
+
+    /// Alternating +1/0/-1/0 per group of 4 weights; with input=[1.0;128], output should be 0.
+    /// byte=0x46 (0b01_00_01_10): lane0=Pos(+1), lane1=Neg(-1), lane2=Zero, lane3=Zero → sum=0
+    #[test]
+    fn ternary_gemv_avx2_sign_canary() {
+        if !has_avx2() {
+            return;
+        }
+        // 0x46 = 0b01_00_01_10: lane0=0b10(+1), lane1=0b01(0), lane2=0b00(-1), lane3=0b01(0)
+        // per-byte contribution with input [1,1,1,1]: (+1 + 0 - 1 + 0) = 0
+        let blocks = vec![make_ternary_block(1.0, [0x46; 32])];
+        let input = vec![1.0_f32; 128];
+        let mut output = vec![99.0_f32; 1];
+
+        unsafe {
+            gemv_tq2_0_g128_avx2(&blocks, &input, &mut output, 1, 128)
+                .expect("avx2 ternary gemv sign canary should succeed");
+        }
+
+        assert!(
+            output[0].abs() < 1e-4,
+            "sign canary: expected 0.0, got {}",
+            output[0]
+        );
+    }
+
+    /// qs=0x00 → all codes=0b00 (Neg=-1), d=1.0, input=[1.0;128] → output=[-128.0;2]
+    #[test]
+    fn ternary_gemv_avx2_all_negative() {
+        if !has_avx2() {
+            return;
+        }
+        let blocks = vec![
+            make_ternary_block(1.0, [0x00; 32]),
+            make_ternary_block(1.0, [0x00; 32]),
+        ];
+        let input = vec![1.0_f32; 128];
+        let mut output = vec![0.0_f32; 2];
+
+        unsafe {
+            gemv_tq2_0_g128_avx2(&blocks, &input, &mut output, 2, 128)
+                .expect("avx2 ternary all-negative gemv should succeed");
+        }
+
+        for i in 0..2 {
+            assert!(
+                (output[i] + 128.0).abs() < 1e-4,
+                "row {i}: expected -128.0, got {}",
+                output[i]
+            );
+        }
+    }
+
+    #[test]
+    fn gemv_tq2_0_g128_avx2_prefetch_matches_reference() {
+        if !has_avx2() {
+            return;
+        }
+
+        let n_rows = 64;
+        let k = 128;
+        let blocks_per_row = k / oxibonsai_core::QK_TQ2_0_G128;
+        let mut blocks = Vec::with_capacity(n_rows * blocks_per_row);
+
+        for row in 0..n_rows {
+            for bi in 0..blocks_per_row {
+                let mut qs = [0u8; 32];
+                for (i, byte) in qs.iter_mut().enumerate() {
+                    *byte = ((row * 17 + bi * 29 + i * 11) & 0xFF) as u8;
+                }
+                blocks.push(make_ternary_block(0.25 + row as f32 * 0.01, qs));
+            }
+        }
+
+        let input: Vec<f32> = (0..k)
+            .map(|i| ((i * 7 % 23) as f32 * 0.125) - 1.5)
+            .collect();
+        let mut out_ref = vec![0.0f32; n_rows];
+        let mut out_avx2 = vec![0.0f32; n_rows];
+
+        crate::gemv_ternary::gemv_tq2_0_g128(&blocks, &input, &mut out_ref, n_rows, k)
+            .expect("reference ternary gemv should succeed");
+        unsafe {
+            gemv_tq2_0_g128_avx2_prefetch(&blocks, &input, &mut out_avx2, n_rows, k)
+                .expect("avx2 prefetch ternary gemv should succeed");
+        }
+
+        let mse = out_ref
+            .iter()
+            .zip(&out_avx2)
+            .map(|(lhs, rhs)| {
+                let diff = lhs - rhs;
+                diff * diff
+            })
+            .sum::<f32>()
+            / n_rows as f32;
+        assert!(mse < 1e-6, "expected MSE < 1e-6, got {mse}");
     }
 }

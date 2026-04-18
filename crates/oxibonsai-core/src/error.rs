@@ -25,7 +25,7 @@ pub enum BonsaiError {
     TensorNotFound { name: String },
 
     /// Unsupported quantization type encountered.
-    #[error("unsupported quantization type: id={type_id} (only Q1_0_g128=41 is supported)")]
+    #[error("unsupported quantization type id {type_id}: known execution types are Q1_0_g128=41, TQ2_0_g128=42, TQ2_0=35")]
     UnsupportedQuantType { type_id: u32 },
 
     /// Memory mapping failed.

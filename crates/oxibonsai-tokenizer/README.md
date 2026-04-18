@@ -1,10 +1,15 @@
 # oxibonsai-tokenizer
 
+**Version:** 0.1.1 · **Status:** Alpha · **Tests:** 85 passing
+
 Pure Rust BPE tokenizer for OxiBonsai — WASM-safe, zero FFI.
 
 Implements a byte-pair encoding (BPE) tokenizer with vocabulary management,
 BPE merge rules, ChatTemplate formatting (chatml), byte-fallback encoding,
 JSON serialization, and a BPE trainer for building new vocabularies.
+
+Functional and in active use within OxiBonsai, but still maturing relative
+to the HuggingFace `tokenizers` crate (hence Alpha).
 
 Part of the [OxiBonsai](https://github.com/cool-japan/oxibonsai) project.
 
@@ -23,7 +28,7 @@ Part of the [OxiBonsai](https://github.com/cool-japan/oxibonsai) project.
 
 ```toml
 [dependencies]
-oxibonsai-tokenizer = "0.1.0"
+oxibonsai-tokenizer = "0.1.1"
 ```
 
 ```rust

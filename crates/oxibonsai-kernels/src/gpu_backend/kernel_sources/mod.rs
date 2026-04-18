@@ -38,6 +38,7 @@
 mod archive;
 mod attention;
 mod decode;
+mod decode_ternary;
 mod prefill;
 mod utility;
 
@@ -47,6 +48,8 @@ pub use archive::*;
 pub use attention::*;
 #[cfg(all(feature = "metal", target_os = "macos"))]
 pub use decode::*;
+#[cfg(all(feature = "metal", target_os = "macos"))]
+pub use decode_ternary::*;
 #[cfg(all(feature = "metal", target_os = "macos"))]
 pub use prefill::*;
 #[cfg(all(feature = "metal", target_os = "macos"))]
@@ -101,6 +104,8 @@ mod tests {
 
         assert!(MSL_ARGMAX.contains("kernel void argmax"));
         assert!(MSL_FUSED_GATE_UP_SWIGLU_Q1.contains("kernel void fused_gate_up_swiglu_q1"));
+        // Ternary GEMV kernel
+        assert!(MSL_GEMV_TQ2_G128_V1.contains("kernel void gemv_tq2_g128_v1"));
 
         // V7-based GEMM batch prefill kernels
         assert!(MSL_GEMM_Q1_G128_V7.contains("kernel void gemm_q1_g128_v7"));

@@ -141,6 +141,41 @@ fn reformat_q1_aos_to_soa(aos_bytes: &[u8]) -> Option<Vec<u8>> {
     Some(soa)
 }
 
+/// Reformat TQ2_0_g128 AoS → SoA for the Metal ternary GEMV kernel.
+///
+/// AoS (input) block layout: `{ qs: [u8; 32], d: f16 }` = 34 bytes
+/// SoA (output) layout: `[all d: N × 2 bytes FP16 LE][all qs: N × 32 bytes]`
+/// Note: the ternary MSL kernel consumes this layout directly — scales first,
+/// then qs data, matching the convention in `scirs2_backend::upload_weights_ternary`.
+///
+/// Total size is unchanged: N × 34 bytes.
+/// Returns `None` if the input length is not a multiple of 34.
+fn reformat_tq2_aos_to_soa(aos_bytes: &[u8]) -> Option<Vec<u8>> {
+    const BLOCK_SIZE: usize = 34;
+    const SCALE_SIZE: usize = 2;
+    const DATA_SIZE: usize = 32;
+
+    if aos_bytes.is_empty() || aos_bytes.len() % BLOCK_SIZE != 0 {
+        return None;
+    }
+
+    let n_blocks = aos_bytes.len() / BLOCK_SIZE;
+    let mut soa = vec![0u8; n_blocks * BLOCK_SIZE];
+
+    let (scales_section, data_section) = soa.split_at_mut(n_blocks * SCALE_SIZE);
+
+    for i in 0..n_blocks {
+        let block_start = i * BLOCK_SIZE;
+        // TQ2 AoS: first 32 bytes are qs, last 2 are scale. SoA: scales first, then qs.
+        data_section[i * DATA_SIZE..i * DATA_SIZE + DATA_SIZE]
+            .copy_from_slice(&aos_bytes[block_start..block_start + DATA_SIZE]);
+        scales_section[i * SCALE_SIZE..i * SCALE_SIZE + SCALE_SIZE]
+            .copy_from_slice(&aos_bytes[block_start + DATA_SIZE..block_start + BLOCK_SIZE]);
+    }
+
+    Some(soa)
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // Pre-compiled pipeline states
 // ═══════════════════════════════════════════════════════════════════════════
@@ -178,6 +213,9 @@ pub(crate) struct MetalPipelines {
     pub(crate) gemm_q1_g128_v7: ComputePipelineState,
     pub(crate) gemm_q1_g128_v7_residual: ComputePipelineState,
     pub(crate) fused_gate_up_swiglu_gemm_q1: ComputePipelineState,
+
+    // ── Ternary (TQ2_0_g128) ────────────────────────────────────────
+    pub(crate) gemv_tq2_g128_v1: ComputePipelineState,
 }
 
 impl MetalPipelines {
@@ -216,6 +254,7 @@ impl MetalPipelines {
         let gemm_q1_g128_v7_residual = pipeline_for(&library, device, "gemm_q1_g128_v7_residual")?;
         let fused_gate_up_swiglu_gemm_q1 =
             pipeline_for(&library, device, "fused_gate_up_swiglu_gemm_q1")?;
+        let gemv_tq2_g128_v1 = pipeline_for(&library, device, "gemv_tq2_g128_v1")?;
 
         Ok(Self {
             gemv_q1_g128_v7,
@@ -236,6 +275,7 @@ impl MetalPipelines {
             gemm_q1_g128_v7,
             gemm_q1_g128_v7_residual,
             fused_gate_up_swiglu_gemm_q1,
+            gemv_tq2_g128_v1,
         })
     }
 }
@@ -300,6 +340,9 @@ fn build_combined_msl() -> String {
     src.push_str(kernel_sources::MSL_GEMM_Q1_G128_V7_RESIDUAL);
     src.push('\n');
     src.push_str(kernel_sources::MSL_FUSED_GATE_UP_SWIGLU_GEMM_Q1);
+    src.push('\n');
+    // ── Ternary (TQ2_0_g128) ────────────────────────────────────────────
+    src.push_str(kernel_sources::MSL_GEMV_TQ2_G128_V1);
     src.push('\n');
     src
 }
@@ -809,6 +852,64 @@ impl MetalGraph {
         Ok(handle)
     }
 
+    /// Upload TQ2_0_g128 (ternary) weight bytes in SoA layout.
+    ///
+    /// Reformats 34-byte AoS blocks `{ qs:[u8;32], d:f16 }` into SoA
+    /// `[N × 2B scales][N × 32B qs]` ready for `gemv_tq2_g128_v1`.
+    pub fn upload_tq2_weight_soa(
+        &self,
+        aos_data: &[u8],
+    ) -> Result<MetalWeightHandle, MetalGraphError> {
+        let soa_data = reformat_tq2_aos_to_soa(aos_data).ok_or_else(|| {
+            MetalGraphError::ExecutionFailed(format!(
+                "TQ2 SoA reformat failed: input length {} is not a multiple of 34",
+                aos_data.len()
+            ))
+        })?;
+        let buffer = upload_bytes(&self.device, &soa_data)?;
+        Ok(MetalWeightHandle {
+            byte_len: soa_data.len(),
+            buffer,
+        })
+    }
+
+    /// Get a cached TQ2 SoA weight handle or reformat AoS→SoA and upload.
+    pub fn get_or_upload_tq2_weight_soa(
+        &self,
+        key: u64,
+        aos_bytes: &[u8],
+    ) -> Result<Arc<MetalWeightHandle>, MetalGraphError> {
+        let mut cache = self
+            .weight_cache
+            .lock()
+            .map_err(|_| MetalGraphError::ExecutionFailed("weight cache lock poisoned".into()))?;
+        if let Some(w) = cache.get(&key) {
+            return Ok(Arc::clone(w));
+        }
+        let handle = Arc::new(self.upload_tq2_weight_soa(aos_bytes)?);
+        cache.insert(key, Arc::clone(&handle));
+        Ok(handle)
+    }
+
+    /// Like `get_or_upload_tq2_weight_soa`, but accepts a closure that produces AoS bytes.
+    pub fn get_or_upload_tq2_weight_soa_lazy(
+        &self,
+        key: u64,
+        data_fn: impl FnOnce() -> Vec<u8>,
+    ) -> Result<Arc<MetalWeightHandle>, MetalGraphError> {
+        let mut cache = self
+            .weight_cache
+            .lock()
+            .map_err(|_| MetalGraphError::ExecutionFailed("weight cache lock poisoned".into()))?;
+        if let Some(w) = cache.get(&key) {
+            return Ok(Arc::clone(w));
+        }
+        let aos_bytes = data_fn();
+        let handle = Arc::new(self.upload_tq2_weight_soa(&aos_bytes)?);
+        cache.insert(key, Arc::clone(&handle));
+        Ok(handle)
+    }
+
     // ─────────────────────────────────────────────────────────────────────
     // Single GEMV dispatch
     // ─────────────────────────────────────────────────────────────────────
@@ -854,6 +955,61 @@ impl MetalGraph {
         let encoder = cmd_buf.new_compute_command_encoder();
 
         self.dispatch_gemv_q1(
+            encoder,
+            &weight.buffer,
+            &input_buf,
+            &output_buf,
+            n_rows as u32,
+            k as u32,
+        );
+
+        encoder.end_encoding();
+        cmd_buf.commit();
+        cmd_buf.wait_until_completed();
+
+        unsafe { download_f32(&output_buf, &mut output[..n_rows]) };
+
+        Ok(())
+    }
+
+    /// Execute a single TQ2_0_g128 (ternary) GEMV: `output = weight × input`.
+    ///
+    /// Mirror of [`encode_gemv`] for ternary weights. `weight` must have been
+    /// uploaded via [`upload_tq2_weight_soa`](Self::upload_tq2_weight_soa).
+    pub fn encode_gemv_tq2(
+        &self,
+        weight: &MetalWeightHandle,
+        input: &[f32],
+        output: &mut [f32],
+        n_rows: usize,
+        k: usize,
+    ) -> Result<(), MetalGraphError> {
+        if input.len() < k {
+            return Err(MetalGraphError::EncodingFailed(format!(
+                "input too short: need {k}, got {}",
+                input.len()
+            )));
+        }
+        if output.len() < n_rows {
+            return Err(MetalGraphError::EncodingFailed(format!(
+                "output too short: need {n_rows}, got {}",
+                output.len()
+            )));
+        }
+
+        let opts = MTLResourceOptions::StorageModeShared;
+        let input_bytes = std::mem::size_of_val(input) as u64;
+        let output_bytes = (n_rows * std::mem::size_of::<f32>()) as u64;
+
+        let input_buf = alloc_buf(&self.device, input_bytes, opts)?;
+        let output_buf = alloc_buf(&self.device, output_bytes, opts)?;
+
+        unsafe { upload_f32(&input_buf, input) };
+
+        let cmd_buf = self.command_queue.new_command_buffer();
+        let encoder = cmd_buf.new_compute_command_encoder();
+
+        self.dispatch_gemv_tq2(
             encoder,
             &weight.buffer,
             &input_buf,
@@ -1387,10 +1543,9 @@ mod tests {
         //   col 2: 1.0 * 128 * 0.5 = 64.0
         //   col 3: 1.0 * 128 * -1.0 = -128.0
         let expected_col_sums = [128.0f32, 256.0, 64.0, -128.0];
-        for col in 0..batch_size as usize {
+        for (col, expected) in expected_col_sums.iter().enumerate() {
             for row in 0..n_rows as usize {
                 let idx = col * n_rows as usize + row;
-                let expected = expected_col_sums[col];
                 assert!(
                     (result[idx] - expected).abs() < 0.1,
                     "GEMM mismatch at col={col} row={row}: expected {expected}, got {}",
@@ -1658,6 +1813,77 @@ mod tests {
                     "batched_rmsnorm mismatch b={b} i={i}: expected {expected}, got {actual}"
                 );
             }
+        }
+    }
+
+    /// Correctness: Metal TQ2 GEMV must match the scalar reference within tolerance.
+    ///
+    /// Uses small shapes so the test runs fast but exercises:
+    /// - SoA AoS→SoA reformat
+    /// - MSL `gemv_tq2_g128_v1` (SIMD-group-per-row, 8 rows/threadgroup)
+    /// - The 2-bit ternary encoding `0b00→-1, 0b01→0, 0b10→+1, 0b11→0`
+    #[test]
+    fn test_encode_gemv_tq2_matches_reference() {
+        if Device::system_default().is_none() {
+            return;
+        }
+        use half::f16;
+        use oxibonsai_core::BlockTQ2_0_g128;
+
+        let graph = MetalGraph::new().expect("failed to create MetalGraph");
+
+        let n_rows = 16usize;
+        let k = 256usize; // 2 blocks per row
+        let blocks_per_row = k / 128;
+
+        // Build a deterministic set of ternary blocks covering every 2-bit code.
+        let mut blocks: Vec<BlockTQ2_0_g128> = Vec::with_capacity(n_rows * blocks_per_row);
+        for row in 0..n_rows {
+            for bk in 0..blocks_per_row {
+                let mut qs = [0u8; 32];
+                for (byte_idx, b) in qs.iter_mut().enumerate() {
+                    let seed = row * 31 + bk * 17 + byte_idx;
+                    let c0 = (seed % 3) as u8;
+                    let c1 = ((seed / 3) % 3) as u8;
+                    let c2 = ((seed / 9) % 3) as u8;
+                    let c3 = ((seed / 27) % 3) as u8;
+                    *b = c0 | (c1 << 2) | (c2 << 4) | (c3 << 6);
+                }
+                blocks.push(BlockTQ2_0_g128 {
+                    qs,
+                    d: f16::from_f32(0.125 + 0.03125 * row as f32),
+                });
+            }
+        }
+
+        let input: Vec<f32> = (0..k).map(|i| (i as f32) * 0.01 - 0.5).collect();
+
+        // Reference via scalar kernel.
+        let mut expected = vec![0f32; n_rows];
+        crate::gemv_ternary::gemv_tq2_0_g128(&blocks, &input, &mut expected, n_rows, k)
+            .expect("scalar reference GEMV failed");
+
+        // Upload via Metal SoA path.
+        let aos_bytes = {
+            let ptr = blocks.as_ptr() as *const u8;
+            let len = std::mem::size_of_val(blocks.as_slice());
+            unsafe { std::slice::from_raw_parts(ptr, len) }
+        };
+        let handle = graph
+            .upload_tq2_weight_soa(aos_bytes)
+            .expect("upload_tq2_weight_soa failed");
+
+        let mut got = vec![0f32; n_rows];
+        graph
+            .encode_gemv_tq2(&handle, &input, &mut got, n_rows, k)
+            .expect("encode_gemv_tq2 failed");
+
+        for (i, (a, b)) in expected.iter().zip(got.iter()).enumerate() {
+            assert!(
+                (a - b).abs() < 1e-3,
+                "row {i}: expected {a}, got {b} (|Δ|={})",
+                (a - b).abs()
+            );
         }
     }
 }

@@ -530,19 +530,34 @@ fn transformer_block_output_shape_matches_input() {
     let up_blocks = make_blocks(inter * blocks_per_row, 0.01, 0xFF);
     let down_blocks = make_blocks(h * (inter / 128), 0.01, 0xFF);
 
+    let kernel_arc = std::sync::Arc::new(oxibonsai_kernels::KernelDispatcher::auto_detect());
     let block = TransformerBlock::new(
         0,
         RmsNormLayer::new(vec![1.0; h], 1e-6),
-        Linear1Bit::new(&q_blocks, nq * hd, h),
-        Linear1Bit::new(&k_blocks, nkv * hd, h),
-        Linear1Bit::new(&v_blocks, nkv * hd, h),
-        Linear1Bit::new(&o_blocks, h, nq * hd),
+        Linear1Bit::new(&q_blocks, nq * hd, h, kernel_arc.clone())
+            .expect("q")
+            .into(),
+        Linear1Bit::new(&k_blocks, nkv * hd, h, kernel_arc.clone())
+            .expect("k")
+            .into(),
+        Linear1Bit::new(&v_blocks, nkv * hd, h, kernel_arc.clone())
+            .expect("v")
+            .into(),
+        Linear1Bit::new(&o_blocks, h, nq * hd, kernel_arc.clone())
+            .expect("o")
+            .into(),
         RmsNormLayer::new(vec![1.0; hd], 1e-6),
         RmsNormLayer::new(vec![1.0; hd], 1e-6),
         RmsNormLayer::new(vec![1.0; h], 1e-6),
-        Linear1Bit::new(&gate_blocks, inter, h),
-        Linear1Bit::new(&up_blocks, inter, h),
-        Linear1Bit::new(&down_blocks, h, inter),
+        Linear1Bit::new(&gate_blocks, inter, h, kernel_arc.clone())
+            .expect("gate")
+            .into(),
+        Linear1Bit::new(&up_blocks, inter, h, kernel_arc.clone())
+            .expect("up")
+            .into(),
+        Linear1Bit::new(&down_blocks, h, inter, kernel_arc.clone())
+            .expect("down")
+            .into(),
         nq,
         nkv,
         hd,
@@ -550,14 +565,14 @@ fn transformer_block_output_shape_matches_input() {
     );
 
     let rope = RopeTable::new(hd, 16, 10000.0);
-    let kernel = oxibonsai_kernels::KernelDispatcher::auto_detect();
+    let kernel = &*kernel_arc;
     let mut kv_cache = KvCache::new(1, nkv, hd, 16);
 
     let mut hidden: Vec<f32> = (0..h).map(|i| (i as f32 + 1.0) * 0.01).collect();
     let original_len = hidden.len();
 
     block
-        .forward(&mut hidden, 0, &mut kv_cache, &rope, &kernel)
+        .forward(&mut hidden, 0, &mut kv_cache, &rope, kernel)
         .expect("forward should succeed");
 
     assert_eq!(
@@ -584,19 +599,34 @@ fn transformer_block_output_differs_from_input() {
     let up_blocks = make_blocks(inter * blocks_per_row, 0.01, 0xFF);
     let down_blocks = make_blocks(h * (inter / 128), 0.01, 0xFF);
 
+    let kernel_arc = std::sync::Arc::new(oxibonsai_kernels::KernelDispatcher::auto_detect());
     let block = TransformerBlock::new(
         0,
         RmsNormLayer::new(vec![1.0; h], 1e-6),
-        Linear1Bit::new(&q_blocks, nq * hd, h),
-        Linear1Bit::new(&k_blocks, nkv * hd, h),
-        Linear1Bit::new(&v_blocks, nkv * hd, h),
-        Linear1Bit::new(&o_blocks, h, nq * hd),
+        Linear1Bit::new(&q_blocks, nq * hd, h, kernel_arc.clone())
+            .expect("q")
+            .into(),
+        Linear1Bit::new(&k_blocks, nkv * hd, h, kernel_arc.clone())
+            .expect("k")
+            .into(),
+        Linear1Bit::new(&v_blocks, nkv * hd, h, kernel_arc.clone())
+            .expect("v")
+            .into(),
+        Linear1Bit::new(&o_blocks, h, nq * hd, kernel_arc.clone())
+            .expect("o")
+            .into(),
         RmsNormLayer::new(vec![1.0; hd], 1e-6),
         RmsNormLayer::new(vec![1.0; hd], 1e-6),
         RmsNormLayer::new(vec![1.0; h], 1e-6),
-        Linear1Bit::new(&gate_blocks, inter, h),
-        Linear1Bit::new(&up_blocks, inter, h),
-        Linear1Bit::new(&down_blocks, h, inter),
+        Linear1Bit::new(&gate_blocks, inter, h, kernel_arc.clone())
+            .expect("gate")
+            .into(),
+        Linear1Bit::new(&up_blocks, inter, h, kernel_arc.clone())
+            .expect("up")
+            .into(),
+        Linear1Bit::new(&down_blocks, h, inter, kernel_arc.clone())
+            .expect("down")
+            .into(),
         nq,
         nkv,
         hd,
@@ -604,14 +634,14 @@ fn transformer_block_output_differs_from_input() {
     );
 
     let rope = RopeTable::new(hd, 16, 10000.0);
-    let kernel = oxibonsai_kernels::KernelDispatcher::auto_detect();
+    let kernel = &*kernel_arc;
     let mut kv_cache = KvCache::new(1, nkv, hd, 16);
 
     let mut hidden: Vec<f32> = (0..h).map(|i| (i as f32 + 1.0) * 0.01).collect();
     let original = hidden.clone();
 
     block
-        .forward(&mut hidden, 0, &mut kv_cache, &rope, &kernel)
+        .forward(&mut hidden, 0, &mut kv_cache, &rope, kernel)
         .expect("forward should succeed");
 
     let max_diff = hidden
@@ -645,19 +675,34 @@ fn transformer_block_residual_connection() {
     let up_blocks = make_blocks(inter * blocks_per_row, 0.001, 0xFF);
     let down_blocks = make_blocks(h * (inter / 128), 0.001, 0xFF);
 
+    let kernel_arc = std::sync::Arc::new(oxibonsai_kernels::KernelDispatcher::auto_detect());
     let block = TransformerBlock::new(
         0,
         RmsNormLayer::new(vec![1.0; h], 1e-6),
-        Linear1Bit::new(&q_blocks, nq * hd, h),
-        Linear1Bit::new(&k_blocks, nkv * hd, h),
-        Linear1Bit::new(&v_blocks, nkv * hd, h),
-        Linear1Bit::new(&o_blocks, h, nq * hd),
+        Linear1Bit::new(&q_blocks, nq * hd, h, kernel_arc.clone())
+            .expect("q")
+            .into(),
+        Linear1Bit::new(&k_blocks, nkv * hd, h, kernel_arc.clone())
+            .expect("k")
+            .into(),
+        Linear1Bit::new(&v_blocks, nkv * hd, h, kernel_arc.clone())
+            .expect("v")
+            .into(),
+        Linear1Bit::new(&o_blocks, h, nq * hd, kernel_arc.clone())
+            .expect("o")
+            .into(),
         RmsNormLayer::new(vec![1.0; hd], 1e-6),
         RmsNormLayer::new(vec![1.0; hd], 1e-6),
         RmsNormLayer::new(vec![1.0; h], 1e-6),
-        Linear1Bit::new(&gate_blocks, inter, h),
-        Linear1Bit::new(&up_blocks, inter, h),
-        Linear1Bit::new(&down_blocks, h, inter),
+        Linear1Bit::new(&gate_blocks, inter, h, kernel_arc.clone())
+            .expect("gate")
+            .into(),
+        Linear1Bit::new(&up_blocks, inter, h, kernel_arc.clone())
+            .expect("up")
+            .into(),
+        Linear1Bit::new(&down_blocks, h, inter, kernel_arc.clone())
+            .expect("down")
+            .into(),
         nq,
         nkv,
         hd,
@@ -665,14 +710,14 @@ fn transformer_block_residual_connection() {
     );
 
     let rope = RopeTable::new(hd, 16, 10000.0);
-    let kernel = oxibonsai_kernels::KernelDispatcher::auto_detect();
+    let kernel = &*kernel_arc;
     let mut kv_cache = KvCache::new(1, nkv, hd, 16);
 
     let mut hidden: Vec<f32> = (0..h).map(|i| (i as f32 + 1.0) * 0.1).collect();
     let original = hidden.clone();
 
     block
-        .forward(&mut hidden, 0, &mut kv_cache, &rope, &kernel)
+        .forward(&mut hidden, 0, &mut kv_cache, &rope, kernel)
         .expect("forward should succeed");
 
     // Because of residual, output should be close to input (small perturbation)
@@ -707,19 +752,34 @@ fn transformer_block_no_nan_in_output() {
     let up_blocks = make_blocks(inter * blocks_per_row, 0.01, 0xFF);
     let down_blocks = make_blocks(h * (inter / 128), 0.01, 0xFF);
 
+    let kernel_arc = std::sync::Arc::new(oxibonsai_kernels::KernelDispatcher::auto_detect());
     let block = TransformerBlock::new(
         0,
         RmsNormLayer::new(vec![1.0; h], 1e-6),
-        Linear1Bit::new(&q_blocks, nq * hd, h),
-        Linear1Bit::new(&k_blocks, nkv * hd, h),
-        Linear1Bit::new(&v_blocks, nkv * hd, h),
-        Linear1Bit::new(&o_blocks, h, nq * hd),
+        Linear1Bit::new(&q_blocks, nq * hd, h, kernel_arc.clone())
+            .expect("q")
+            .into(),
+        Linear1Bit::new(&k_blocks, nkv * hd, h, kernel_arc.clone())
+            .expect("k")
+            .into(),
+        Linear1Bit::new(&v_blocks, nkv * hd, h, kernel_arc.clone())
+            .expect("v")
+            .into(),
+        Linear1Bit::new(&o_blocks, h, nq * hd, kernel_arc.clone())
+            .expect("o")
+            .into(),
         RmsNormLayer::new(vec![1.0; hd], 1e-6),
         RmsNormLayer::new(vec![1.0; hd], 1e-6),
         RmsNormLayer::new(vec![1.0; h], 1e-6),
-        Linear1Bit::new(&gate_blocks, inter, h),
-        Linear1Bit::new(&up_blocks, inter, h),
-        Linear1Bit::new(&down_blocks, h, inter),
+        Linear1Bit::new(&gate_blocks, inter, h, kernel_arc.clone())
+            .expect("gate")
+            .into(),
+        Linear1Bit::new(&up_blocks, inter, h, kernel_arc.clone())
+            .expect("up")
+            .into(),
+        Linear1Bit::new(&down_blocks, h, inter, kernel_arc.clone())
+            .expect("down")
+            .into(),
         nq,
         nkv,
         hd,
@@ -727,14 +787,14 @@ fn transformer_block_no_nan_in_output() {
     );
 
     let rope = RopeTable::new(hd, 16, 10000.0);
-    let kernel = oxibonsai_kernels::KernelDispatcher::auto_detect();
+    let kernel = &*kernel_arc;
     let mut kv_cache = KvCache::new(1, nkv, hd, 16);
 
     let mut state = 42u64;
     let mut hidden = random_tensor(&mut state, h);
 
     block
-        .forward(&mut hidden, 0, &mut kv_cache, &rope, &kernel)
+        .forward(&mut hidden, 0, &mut kv_cache, &rope, kernel)
         .expect("forward should succeed");
 
     assert_no_nan(&hidden, "block_output");

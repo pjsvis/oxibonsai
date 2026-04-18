@@ -107,6 +107,7 @@ impl SamplerBuilder {
             top_k: self.top_k,
             top_p: self.top_p,
             repetition_penalty: self.repetition_penalty,
+            max_tokens: SamplingParams::default().max_tokens,
         };
 
         Ok(Sampler::new(params, self.seed))

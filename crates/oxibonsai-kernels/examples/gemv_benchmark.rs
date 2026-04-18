@@ -147,8 +147,6 @@ mod metal_bench {
         let output_buf =
             device.new_buffer(output_bytes as u64, MTLResourceOptions::StorageModeShared);
 
-        let tg_count = ((n_rows as u64) + 7) / 8;
-
         // ── Warmup ──────────────────────────────────────────────────────
 
         for _ in 0..WARMUP_ITERS {
@@ -160,7 +158,6 @@ mod metal_bench {
                 &output_buf,
                 n_rows,
                 k,
-                tg_count,
             );
         }
 
@@ -176,7 +173,6 @@ mod metal_bench {
                 &output_buf,
                 n_rows,
                 k,
-                tg_count,
             );
         }
         let elapsed = start.elapsed();
@@ -207,8 +203,8 @@ mod metal_bench {
         output_buf: &Buffer,
         n_rows: u32,
         k: u32,
-        tg_count: u64,
     ) {
+        let tg_count = u64::from(n_rows).div_ceil(8);
         let cmd = queue.new_command_buffer();
         let enc = cmd.new_compute_command_encoder();
 

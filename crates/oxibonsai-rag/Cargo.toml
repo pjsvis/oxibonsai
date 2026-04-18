@@ -13,7 +13,7 @@ categories = ["science", "algorithms"]
 readme = "README.md"
 
 [dependencies]
-oxibonsai-core = { path = "../oxibonsai-core", version = "0.1.0" }
+oxibonsai-core.workspace = true
 tracing = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }

@@ -129,8 +129,8 @@ impl<'a> PrefixCachedEngine<'a> {
             .inner
             .generate_with_seed(
                 effective_prompt,
-                params.top_k.max(1) * 4, // reasonable max_tokens upper bound
-                0,                       // seed — deterministic per call
+                params.max_tokens,
+                0, // seed — deterministic per call
                 params,
             )
             .unwrap_or_else(|e| {
@@ -219,7 +219,13 @@ mod tests {
         let mut engine = make_engine(16);
         // Run a generate so the cache might get some blocks.
         let prompt: Vec<u32> = (0..32).collect();
-        let _ = engine.generate(&prompt, &SamplingParams::default());
+        let fast_params = SamplingParams {
+            max_tokens: 4,
+            top_k: 1,
+            temperature: 0.0,
+            ..SamplingParams::default()
+        };
+        let _ = engine.generate(&prompt, &fast_params);
         engine.clear_cache();
         let stats = engine.cache_stats();
         assert_eq!(stats.cached_blocks, 0);
@@ -237,13 +243,20 @@ mod tests {
     fn prefix_cached_engine_repeated_prompt_builds_cache() {
         let mut engine = make_engine(32);
         let prompt: Vec<u32> = (0..32).collect();
+        // Use minimal generation to populate the cache quickly.
+        let fast_params = SamplingParams {
+            max_tokens: 4,
+            top_k: 1,
+            temperature: 0.0,
+            ..SamplingParams::default()
+        };
         // First call: cold cache.
-        let _ = engine.generate(&prompt, &SamplingParams::default());
+        let _ = engine.generate(&prompt, &fast_params);
         // After first call blocks may be stored.
         let stats_after_first = engine.cache_stats();
 
         // Second call: same prompt; should get cache hits.
-        let _ = engine.generate(&prompt, &SamplingParams::default());
+        let _ = engine.generate(&prompt, &fast_params);
         let stats_after_second = engine.cache_stats();
 
         // Either hits increased or the cache has blocks.

@@ -273,6 +273,27 @@ unsafe fn hsum_neon(v: float32x4_t) -> f32 {
     vgetq_lane_f32::<0>(sum)
 }
 
+#[cfg(target_arch = "aarch64")]
+#[inline(always)]
+unsafe fn decode_byte_neon_to_f32x4(b: u8, one: uint32x4_t) -> float32x4_t {
+    let idx_arr: [u32; 4] = [
+        (b & 3) as u32,
+        ((b >> 2) & 3) as u32,
+        ((b >> 4) & 3) as u32,
+        ((b >> 6) & 3) as u32,
+    ];
+    let idx_v = vld1q_u32(idx_arr.as_ptr());
+    let pos_part = vshrq_n_u32::<1>(idx_v);
+    let min_part = vminq_u32(idx_v, one);
+    let neg_part = vsubq_u32(one, min_part);
+    let val_i32 = vsubq_s32(
+        vreinterpretq_s32_u32(pos_part),
+        vreinterpretq_s32_u32(neg_part),
+    );
+    let reserved = vceqq_u32(idx_v, vdupq_n_u32(3));
+    vcvtq_f32_s32(vbslq_s32(reserved, vdupq_n_s32(0), val_i32))
+}
+
 // ─── Prefetch-optimized GEMV ────────────────────────────────────────────
 
 /// NEON-accelerated 1-bit GEMV with software prefetch hints.
@@ -535,6 +556,310 @@ pub unsafe fn gemm_1bit_g128_neon_prefetch(
     Ok(())
 }
 
+// ─── NEON Ternary TQ2_0_g128 Kernels ─────────────────────────────────────
+
+/// NEON-accelerated dequantization of TQ2\_0\_g128 blocks to FP32.
+///
+/// Decodes 2-bit ternary codes (4 per byte, 32 bytes per block = 128 weights)
+/// and scales by the block's FP16 scale factor. Processes 4 weights per
+/// NEON iteration (one byte decoded to `[f32; 4]` then scaled).
+///
+/// # Safety
+/// Requires NEON CPU support (always available on AArch64).
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon")]
+pub unsafe fn dequant_tq2_0_g128_neon(
+    blocks: &[oxibonsai_core::BlockTQ2_0_g128],
+    output: &mut [f32],
+) -> KernelResult<()> {
+    use oxibonsai_core::QK_TQ2_0_G128;
+    let needed = blocks.len() * QK_TQ2_0_G128;
+    if output.len() < needed {
+        return Err(KernelError::BufferTooSmall {
+            needed,
+            available: output.len(),
+        });
+    }
+
+    let one = vdupq_n_u32(1);
+
+    for (bi, block) in blocks.iter().enumerate() {
+        let d = block.d.to_f32();
+        let scale = vdupq_n_f32(d);
+        let base = bi * QK_TQ2_0_G128;
+
+        // 32 bytes × 4 weights = 128 weights; process 1 byte (4 weights) per NEON iteration
+        // 32 iterations per block
+        for byte_idx in 0..32 {
+            let b = block.qs[byte_idx];
+            let val_f = decode_byte_neon_to_f32x4(b, one);
+
+            let result = vmulq_f32(scale, val_f);
+            vst1q_f32(output.as_mut_ptr().add(base + byte_idx * 4), result);
+        }
+    }
+
+    Ok(())
+}
+
+/// NEON-accelerated GEMV for TQ2\_0\_g128-quantized weight matrices.
+///
+/// Computes `output[row] = dot(weight_row, input)` for each row.
+/// Decodes 4 weights per iteration (one byte → `[f32; 4]`), loads with
+/// `vld1q_f32`, and accumulates with `vfmaq_f32`.
+///
+/// # Safety
+/// Requires NEON CPU support (always available on AArch64).
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon")]
+pub unsafe fn gemv_tq2_0_g128_neon(
+    blocks: &[oxibonsai_core::BlockTQ2_0_g128],
+    input: &[f32],
+    output: &mut [f32],
+    n_rows: usize,
+    k: usize,
+) -> KernelResult<()> {
+    use oxibonsai_core::QK_TQ2_0_G128;
+
+    if k % QK_TQ2_0_G128 != 0 {
+        return Err(KernelError::NotBlockAligned {
+            count: k,
+            block_size: QK_TQ2_0_G128,
+        });
+    }
+    if input.len() < k {
+        return Err(KernelError::DimensionMismatch {
+            expected: k,
+            got: input.len(),
+        });
+    }
+    if output.len() < n_rows {
+        return Err(KernelError::BufferTooSmall {
+            needed: n_rows,
+            available: output.len(),
+        });
+    }
+
+    let blocks_per_row = k / QK_TQ2_0_G128;
+    let expected_blocks = n_rows * blocks_per_row;
+    if blocks.len() < expected_blocks {
+        return Err(KernelError::BufferTooSmall {
+            needed: expected_blocks,
+            available: blocks.len(),
+        });
+    }
+
+    let one = vdupq_n_u32(1);
+
+    for row in 0..n_rows {
+        let row_blocks = &blocks[row * blocks_per_row..(row + 1) * blocks_per_row];
+        let mut row_sum = 0.0_f32;
+
+        for (bi, block) in row_blocks.iter().enumerate() {
+            let d = block.d.to_f32();
+            let inp_base = bi * QK_TQ2_0_G128;
+            let mut block_acc = vdupq_n_f32(0.0_f32);
+
+            // 32 iterations × 4 weights = 128 weights per block
+            // Each iteration consumes 1 byte of qs
+            for byte_idx in 0..32 {
+                let b = block.qs[byte_idx];
+                let val_f = decode_byte_neon_to_f32x4(b, one);
+                let inp_vec = vld1q_f32(input.as_ptr().add(inp_base + byte_idx * 4));
+                block_acc = vfmaq_f32(block_acc, val_f, inp_vec);
+            }
+
+            row_sum += d * hsum_neon(block_acc);
+        }
+
+        output[row] = row_sum;
+    }
+
+    Ok(())
+}
+
+/// NEON-accelerated GEMV for TQ2\_0\_g128 with prefetch and 2-byte unroll.
+///
+/// # Safety
+/// Requires NEON CPU support (always available on AArch64).
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon")]
+pub unsafe fn gemv_tq2_0_g128_neon_prefetch(
+    blocks: &[oxibonsai_core::BlockTQ2_0_g128],
+    input: &[f32],
+    output: &mut [f32],
+    n_rows: usize,
+    k: usize,
+) -> KernelResult<()> {
+    use oxibonsai_core::QK_TQ2_0_G128;
+
+    if k % QK_TQ2_0_G128 != 0 {
+        return Err(KernelError::NotBlockAligned {
+            count: k,
+            block_size: QK_TQ2_0_G128,
+        });
+    }
+    if input.len() < k {
+        return Err(KernelError::DimensionMismatch {
+            expected: k,
+            got: input.len(),
+        });
+    }
+    if output.len() < n_rows {
+        return Err(KernelError::BufferTooSmall {
+            needed: n_rows,
+            available: output.len(),
+        });
+    }
+
+    let blocks_per_row = k / QK_TQ2_0_G128;
+    let expected_blocks = n_rows * blocks_per_row;
+    if blocks.len() < expected_blocks {
+        return Err(KernelError::BufferTooSmall {
+            needed: expected_blocks,
+            available: blocks.len(),
+        });
+    }
+
+    let one = vdupq_n_u32(1);
+
+    for (row, out) in output.iter_mut().enumerate().take(n_rows) {
+        let row_offset = row * blocks_per_row;
+
+        if row + 1 < n_rows {
+            let next_row_ptr = blocks.as_ptr().add((row + 1) * blocks_per_row) as *const i8;
+            core::arch::aarch64::_prefetch(next_row_ptr, 0, 3);
+        }
+
+        let mut row_sum = 0.0f32;
+        for block_idx in 0..blocks_per_row {
+            if block_idx + 1 < blocks_per_row {
+                let next_block_ptr = blocks.as_ptr().add(row_offset + block_idx + 1) as *const i8;
+                core::arch::aarch64::_prefetch(next_block_ptr, 0, 3);
+            }
+
+            let block = &blocks[row_offset + block_idx];
+            let d = block.d.to_f32();
+            let inp_base = block_idx * QK_TQ2_0_G128;
+            let mut acc0 = vdupq_n_f32(0.0f32);
+            let mut acc1 = vdupq_n_f32(0.0f32);
+
+            for pair in 0..16 {
+                let b0 = block.qs[pair * 2];
+                let b1 = block.qs[pair * 2 + 1];
+
+                let val0 = decode_byte_neon_to_f32x4(b0, one);
+                let inp0 = vld1q_f32(input.as_ptr().add(inp_base + pair * 8));
+                acc0 = vfmaq_f32(acc0, val0, inp0);
+
+                let val1 = decode_byte_neon_to_f32x4(b1, one);
+                let inp1 = vld1q_f32(input.as_ptr().add(inp_base + pair * 8 + 4));
+                acc1 = vfmaq_f32(acc1, val1, inp1);
+            }
+
+            row_sum += d * hsum_neon(vaddq_f32(acc0, acc1));
+        }
+
+        *out = row_sum;
+    }
+
+    Ok(())
+}
+
+/// NEON-accelerated GEMM for TQ2\_0\_g128-quantized weight matrices.
+///
+/// Computes `output[m, n] = sum_k(weight[n, k] * input[m, k])` for each (m, n) pair.
+/// Iterates over batch dimension `m`, using per-row GEMV logic with NEON FMA.
+///
+/// # Safety
+/// Requires NEON CPU support (always available on AArch64).
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon")]
+pub unsafe fn gemm_tq2_0_g128_neon(
+    blocks: &[oxibonsai_core::BlockTQ2_0_g128],
+    input: &[f32],
+    output: &mut [f32],
+    m: usize,
+    n_rows: usize,
+    k: usize,
+) -> KernelResult<()> {
+    use oxibonsai_core::QK_TQ2_0_G128;
+
+    if k % QK_TQ2_0_G128 != 0 {
+        return Err(KernelError::NotBlockAligned {
+            count: k,
+            block_size: QK_TQ2_0_G128,
+        });
+    }
+    if input.len() < m * k {
+        return Err(KernelError::DimensionMismatch {
+            expected: m * k,
+            got: input.len(),
+        });
+    }
+    if output.len() < m * n_rows {
+        return Err(KernelError::BufferTooSmall {
+            needed: m * n_rows,
+            available: output.len(),
+        });
+    }
+
+    let blocks_per_row = k / QK_TQ2_0_G128;
+    let expected_blocks = n_rows * blocks_per_row;
+    if blocks.len() < expected_blocks {
+        return Err(KernelError::BufferTooSmall {
+            needed: expected_blocks,
+            available: blocks.len(),
+        });
+    }
+
+    let one = vdupq_n_u32(1);
+
+    for mi in 0..m {
+        let input_row = &input[mi * k..];
+
+        for ni in 0..n_rows {
+            let row_blocks = &blocks[ni * blocks_per_row..(ni + 1) * blocks_per_row];
+            let mut row_sum = 0.0_f32;
+
+            for (bi, block) in row_blocks.iter().enumerate() {
+                let d = block.d.to_f32();
+                let inp_base = bi * QK_TQ2_0_G128;
+                let mut block_acc = vdupq_n_f32(0.0_f32);
+
+                for byte_idx in 0..32 {
+                    let b = block.qs[byte_idx];
+
+                    let idx_arr: [u32; 4] = [
+                        (b & 3) as u32,
+                        ((b >> 2) & 3) as u32,
+                        ((b >> 4) & 3) as u32,
+                        ((b >> 6) & 3) as u32,
+                    ];
+                    let idx_v = vld1q_u32(idx_arr.as_ptr());
+                    let pos_part = vshrq_n_u32::<1>(idx_v);
+                    let min_part = vminq_u32(idx_v, one);
+                    let neg_part = vsubq_u32(one, min_part);
+                    let val_i32 = vsubq_s32(
+                        vreinterpretq_s32_u32(pos_part),
+                        vreinterpretq_s32_u32(neg_part),
+                    );
+                    let val_f = vcvtq_f32_s32(val_i32);
+
+                    let inp_vec = vld1q_f32(input_row.as_ptr().add(inp_base + byte_idx * 4));
+                    block_acc = vfmaq_f32(block_acc, val_f, inp_vec);
+                }
+
+                row_sum += d * hsum_neon(block_acc);
+            }
+
+            output[mi * n_rows + ni] = row_sum;
+        }
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 #[cfg(target_arch = "aarch64")]
 mod tests {
@@ -764,5 +1089,129 @@ mod tests {
                 out_pf[i]
             );
         }
+    }
+
+    // ─── Ternary TQ2_0_g128 NEON tests ────────────────────────────────────
+
+    fn make_ternary_block(scale: f32, qs: [u8; 32]) -> oxibonsai_core::BlockTQ2_0_g128 {
+        oxibonsai_core::BlockTQ2_0_g128 {
+            qs,
+            d: f16::from_f32(scale),
+        }
+    }
+
+    /// qs=0xAA → all codes=0b10 (Pos=+1), d=1.0, input=[1.0;128] → output=[128.0;2]
+    #[test]
+    fn ternary_gemv_neon_matches_scalar() {
+        // 0xAA = 0b10_10_10_10: all 4 codes per byte = 0b10 (Pos = +1)
+        let blocks = vec![
+            make_ternary_block(1.0, [0xAA; 32]),
+            make_ternary_block(1.0, [0xAA; 32]),
+        ];
+        let input = vec![1.0_f32; 128];
+        let mut out_neon = vec![0.0_f32; 2];
+        let mut out_ref = vec![0.0_f32; 2];
+
+        crate::gemv_ternary::gemv_tq2_0_g128(&blocks, &input, &mut out_ref, 2, 128)
+            .expect("reference gemv should succeed");
+        unsafe {
+            gemv_tq2_0_g128_neon(&blocks, &input, &mut out_neon, 2, 128)
+                .expect("neon ternary gemv should succeed");
+        }
+
+        for i in 0..2 {
+            assert!(
+                (out_neon[i] - out_ref[i]).abs() < 1e-4,
+                "row {i}: neon={}, ref={}",
+                out_neon[i],
+                out_ref[i]
+            );
+        }
+    }
+
+    /// Alternating +1/0/-1/0 per group of 4 weights; with input=[1.0;128], output should be 0.
+    /// byte=0x46 (0b01_00_01_10): lane0=Pos(+1), lane1=Zero, lane2=Neg(-1), lane3=Zero → sum=0
+    #[test]
+    fn ternary_gemv_neon_sign_canary() {
+        let blocks = vec![make_ternary_block(1.0, [0x46; 32])];
+        let input = vec![1.0_f32; 128];
+        let mut output = vec![99.0_f32; 1];
+
+        unsafe {
+            gemv_tq2_0_g128_neon(&blocks, &input, &mut output, 1, 128)
+                .expect("neon ternary gemv sign canary should succeed");
+        }
+
+        assert!(
+            output[0].abs() < 1e-4,
+            "sign canary: expected 0.0, got {}",
+            output[0]
+        );
+    }
+
+    /// qs=0x00 → all codes=0b00 (Neg=-1), d=1.0, input=[1.0;128] → output=[-128.0;2]
+    #[test]
+    fn ternary_gemv_neon_all_negative() {
+        let blocks = vec![
+            make_ternary_block(1.0, [0x00; 32]),
+            make_ternary_block(1.0, [0x00; 32]),
+        ];
+        let input = vec![1.0_f32; 128];
+        let mut output = vec![0.0_f32; 2];
+
+        unsafe {
+            gemv_tq2_0_g128_neon(&blocks, &input, &mut output, 2, 128)
+                .expect("neon ternary all-negative gemv should succeed");
+        }
+
+        for (i, val) in output.iter().enumerate() {
+            assert!(
+                (val + 128.0).abs() < 1e-4,
+                "row {i}: expected -128.0, got {}",
+                val
+            );
+        }
+    }
+
+    #[test]
+    fn gemv_tq2_0_g128_neon_prefetch_matches_reference() {
+        let n_rows = 64;
+        let k = 128;
+        let blocks_per_row = k / oxibonsai_core::QK_TQ2_0_G128;
+        let mut blocks = Vec::with_capacity(n_rows * blocks_per_row);
+
+        for row in 0..n_rows {
+            for bi in 0..blocks_per_row {
+                let mut qs = [0u8; 32];
+                for (i, byte) in qs.iter_mut().enumerate() {
+                    *byte = ((row * 17 + bi * 29 + i * 11) & 0xFF) as u8;
+                }
+                blocks.push(make_ternary_block(0.25 + row as f32 * 0.01, qs));
+            }
+        }
+
+        let input: Vec<f32> = (0..k)
+            .map(|i| ((i * 7 % 23) as f32 * 0.125) - 1.5)
+            .collect();
+        let mut out_ref = vec![0.0f32; n_rows];
+        let mut out_neon = vec![0.0f32; n_rows];
+
+        crate::gemv_ternary::gemv_tq2_0_g128(&blocks, &input, &mut out_ref, n_rows, k)
+            .expect("reference ternary gemv should succeed");
+        unsafe {
+            gemv_tq2_0_g128_neon_prefetch(&blocks, &input, &mut out_neon, n_rows, k)
+                .expect("neon prefetch ternary gemv should succeed");
+        }
+
+        let mse = out_ref
+            .iter()
+            .zip(&out_neon)
+            .map(|(lhs, rhs)| {
+                let diff = lhs - rhs;
+                diff * diff
+            })
+            .sum::<f32>()
+            / n_rows as f32;
+        assert!(mse < 1e-6, "expected MSE < 1e-6, got {mse}");
     }
 }

@@ -8,7 +8,9 @@ use crate::error::{BonsaiError, BonsaiResult};
 /// GGUF tensor quantization types.
 ///
 /// OxiBonsai focuses on Q1\_0\_g128 (type ID 41, PrismML extension),
-/// but recognizes other types for metadata-only access.
+/// TQ2\_0\_g128 (type ID 42, PrismML ternary extension), and TQ2\_0
+/// (type ID 35, llama.cpp upstream ternary), but recognizes other types
+/// for metadata-only access.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(u32)]
 #[allow(non_camel_case_types)]
@@ -28,8 +30,12 @@ pub enum GgufTensorType {
     Q6_K = 14,
     Q8_K = 15,
     BF16 = 30,
+    /// llama.cpp ternary quantization: 256 sign-2 bits + FP16 group scale (upstream ID 35).
+    TQ2_0 = 35,
     /// PrismML 1-bit quantization: 128 sign bits + FP16 group scale.
     Q1_0_g128 = 41,
+    /// PrismML ternary quantization: 128 sign-2 bits + FP16 group scale.
+    TQ2_0_g128 = 42,
 }
 
 impl GgufTensorType {
@@ -51,7 +57,9 @@ impl GgufTensorType {
             14 => Ok(Self::Q6_K),
             15 => Ok(Self::Q8_K),
             30 => Ok(Self::BF16),
+            35 => Ok(Self::TQ2_0),
             41 => Ok(Self::Q1_0_g128),
+            42 => Ok(Self::TQ2_0_g128),
             _ => Err(BonsaiError::UnsupportedQuantType { type_id: id }),
         }
     }
@@ -63,6 +71,8 @@ impl GgufTensorType {
             Self::Q4_0 | Self::Q4_1 | Self::Q5_0 | Self::Q5_1 | Self::Q8_0 | Self::Q8_1 => 32,
             Self::Q2_K | Self::Q3_K | Self::Q4_K | Self::Q5_K | Self::Q6_K | Self::Q8_K => 256,
             Self::Q1_0_g128 => 128,
+            Self::TQ2_0_g128 => 128,
+            Self::TQ2_0 => 256,
         }
     }
 
@@ -71,25 +81,32 @@ impl GgufTensorType {
         match self {
             Self::F32 => 4,
             Self::F16 | Self::BF16 => 2,
-            Self::Q4_0 => 18,      // 2 + 16
-            Self::Q4_1 => 20,      // 2 + 2 + 16
-            Self::Q5_0 => 22,      // 2 + 4 + 16
-            Self::Q5_1 => 24,      // 2 + 2 + 4 + 16
-            Self::Q8_0 => 34,      // 2 + 32
-            Self::Q8_1 => 40,      // 4 + 4 + 32
-            Self::Q2_K => 84,      // 256/4 + 256/16 + 2+2
-            Self::Q3_K => 110,     // 256/4 + 256/8 + 12+2
-            Self::Q4_K => 144,     // 2+2+12+4*32
-            Self::Q5_K => 176,     // 2+2+12+4*32+256/8
-            Self::Q6_K => 210,     // 256/2+256/4+256/16+2
-            Self::Q8_K => 292,     // 4+256+256/16
-            Self::Q1_0_g128 => 18, // 2 (FP16 scale) + 16 (128 sign bits)
+            Self::Q4_0 => 18,       // 2 + 16
+            Self::Q4_1 => 20,       // 2 + 2 + 16
+            Self::Q5_0 => 22,       // 2 + 4 + 16
+            Self::Q5_1 => 24,       // 2 + 2 + 4 + 16
+            Self::Q8_0 => 34,       // 2 + 32
+            Self::Q8_1 => 40,       // 4 + 4 + 32
+            Self::Q2_K => 84,       // 256/4 + 256/16 + 2+2
+            Self::Q3_K => 110,      // 256/4 + 256/8 + 12+2
+            Self::Q4_K => 144,      // 2+2+12+4*32
+            Self::Q5_K => 176,      // 2+2+12+4*32+256/8
+            Self::Q6_K => 210,      // 256/2+256/4+256/16+2
+            Self::Q8_K => 292,      // 4+256+256/16
+            Self::Q1_0_g128 => 18,  // 2 (FP16 scale) + 16 (128 sign bits)
+            Self::TQ2_0_g128 => 34, // 2 (FP16 scale) + 32 (128 ternary-2bit packed)
+            Self::TQ2_0 => 66,      // 2 (FP16 scale) + 64 (256 ternary-2bit packed)
         }
     }
 
     /// Returns true if this is the Q1\_0\_g128 1-bit quantization type.
     pub fn is_one_bit(&self) -> bool {
         matches!(self, Self::Q1_0_g128)
+    }
+
+    /// Returns true if this is a ternary ({-1, 0, +1}) quantization type.
+    pub fn is_ternary(&self) -> bool {
+        matches!(self, Self::TQ2_0 | Self::TQ2_0_g128)
     }
 
     /// Display name for this quantization type.
@@ -110,7 +127,9 @@ impl GgufTensorType {
             Self::Q6_K => "Q6_K",
             Self::Q8_K => "Q8_K",
             Self::BF16 => "BF16",
+            Self::TQ2_0 => "TQ2_0",
             Self::Q1_0_g128 => "Q1_0_g128",
+            Self::TQ2_0_g128 => "TQ2_0_g128",
         }
     }
 }
@@ -197,7 +216,49 @@ mod tests {
 
     #[test]
     fn reject_unknown_type_id() {
-        assert!(GgufTensorType::from_id(42).is_err());
+        // 42 is now TQ2_0_g128; use a truly unregistered ID
+        assert!(GgufTensorType::from_id(50).is_err());
         assert!(GgufTensorType::from_id(100).is_err());
+    }
+
+    #[test]
+    fn tq2_0_g128_ternary_properties() {
+        let ty = GgufTensorType::TQ2_0_g128;
+        assert_eq!(ty.block_size(), 128);
+        assert_eq!(ty.block_bytes(), 34);
+        assert!(ty.is_ternary());
+        assert!(!ty.is_one_bit());
+        assert_eq!(ty.name(), "TQ2_0_g128");
+        assert_eq!(ty as u32, 42);
+    }
+
+    #[test]
+    fn tq2_0_ternary_properties() {
+        let ty = GgufTensorType::TQ2_0;
+        assert_eq!(ty.block_size(), 256);
+        assert_eq!(ty.block_bytes(), 66);
+        assert!(ty.is_ternary());
+        assert!(!ty.is_one_bit());
+        assert_eq!(ty.name(), "TQ2_0");
+        assert_eq!(ty as u32, 35);
+    }
+
+    #[test]
+    fn parse_ternary_type_ids() {
+        assert_eq!(
+            GgufTensorType::from_id(42).expect("42 valid"),
+            GgufTensorType::TQ2_0_g128
+        );
+        let tq2_id = GgufTensorType::TQ2_0 as u32;
+        assert_eq!(
+            GgufTensorType::from_id(tq2_id).expect("TQ2_0 id valid"),
+            GgufTensorType::TQ2_0
+        );
+    }
+
+    #[test]
+    fn one_bit_is_not_ternary() {
+        assert!(!GgufTensorType::Q1_0_g128.is_ternary());
+        assert!(GgufTensorType::Q1_0_g128.is_one_bit());
     }
 }

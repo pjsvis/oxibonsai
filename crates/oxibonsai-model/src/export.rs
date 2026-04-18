@@ -31,6 +31,11 @@ pub enum ExportFormat {
     Q1_0G128,
     /// Quantize to INT8 per output channel.
     Int8PerChannel,
+    /// Ternary quantization: {-1, 0, +1} weights packed as TQ2_0_g128 (34 B / 128 weights).
+    ///
+    /// Embedding and LM-head tensors are ternary-encoded (unlike Q1_0G128 which keeps them
+    /// FP16). Only RMS-norm weights remain FP32.
+    TernaryG128,
 }
 
 // ─── Config ───────────────────────────────────────────────────────────────────
@@ -220,6 +225,19 @@ fn encode_tensor(
             // in the GGUF metadata conveys the actual quantization used.
             Ok((bytes, TensorType::F32))
         }
+
+        ExportFormat::TernaryG128 => {
+            // Pad to a multiple of TERNARY_GROUP_SIZE inside quantize_tq2_0_g128
+            // if necessary (it handles the padding internally and emits a tracing::warn).
+            let bytes =
+                crate::quantize_ternary::quantize_tq2_0_g128(&tensor.data).map_err(|e| {
+                    ExportError::QuantizeError {
+                        name: tensor.name.clone(),
+                        reason: e.to_string(),
+                    }
+                })?;
+            Ok((bytes, TensorType::TQ2_0_g128))
+        }
     }
 }
 
@@ -267,6 +285,7 @@ pub fn export_to_gguf(
         ExportFormat::Float32 => "F32",
         ExportFormat::Q1_0G128 => "Q1_0G128",
         ExportFormat::Int8PerChannel => "INT8_PER_CHANNEL",
+        ExportFormat::TernaryG128 => "TQ2_0_g128",
     };
     writer.add_metadata(
         "general.quantization_version",
@@ -336,6 +355,9 @@ pub fn estimate_export_size(tensors: &[WeightTensor], config: &ExportConfig) -> 
                     let num_channels = t.shape.first().copied().unwrap_or(1).max(1);
                     // i8 data + f32 scales
                     t.data.len() + num_channels * 4
+                }
+                ExportFormat::TernaryG128 => {
+                    crate::quantize_ternary::tq2_0_g128_size_bytes(t.data.len())
                 }
             }
         })
@@ -507,5 +529,76 @@ mod tests {
         // Tensor count in GGUF header (bytes 8..16 as u64) should be 1.
         let tensor_count = u64::from_le_bytes(bytes[8..16].try_into().expect("slice"));
         assert_eq!(tensor_count, 1, "empty tensor should be skipped");
+    }
+
+    // ── TernaryG128 export ────────────────────────────────────────────────
+
+    #[test]
+    fn test_estimate_export_size_ternary_g128() {
+        // 128 weights → 1 TQ2_0_g128 block → 34 bytes
+        let tensors = vec![WeightTensor::new("w", vec![1.0; 128], vec![128])];
+        let config = ExportConfig::new(ExportFormat::TernaryG128, "m");
+        let size = estimate_export_size(&tensors, &config);
+        assert_eq!(
+            size, 34,
+            "128-weight tensor in TernaryG128 should be 34 bytes"
+        );
+    }
+
+    #[test]
+    fn test_estimate_export_size_ternary_g128_two_blocks() {
+        // 256 weights → 2 TQ2_0_g128 blocks → 68 bytes
+        let tensors = vec![WeightTensor::new("w", vec![1.0; 256], vec![256])];
+        let config = ExportConfig::new(ExportFormat::TernaryG128, "m");
+        let size = estimate_export_size(&tensors, &config);
+        assert_eq!(
+            size, 68,
+            "256-weight tensor in TernaryG128 should be 68 bytes"
+        );
+    }
+
+    #[test]
+    fn test_export_stats_ternary_g128_compression() {
+        // 512 weights in TernaryG128: 4 blocks × 34 = 136 bytes; original: 512*4 = 2048.
+        let tensors = vec![WeightTensor::new("w", vec![1.0; 512], vec![512])];
+        let config = ExportConfig::new(ExportFormat::TernaryG128, "m");
+        let stats = export_stats(&tensors, &config);
+        assert!(
+            stats.compression_ratio > 1.0,
+            "TernaryG128 should compress better than FP32"
+        );
+        assert_eq!(stats.quantized_tensors, 1);
+        assert_eq!(stats.fp32_tensors, 0);
+    }
+
+    #[test]
+    fn test_export_to_gguf_ternary_g128_basic() {
+        // 128 weights → 1 TQ2_0_g128 block → valid GGUF with magic header.
+        let tensors = vec![WeightTensor::new(
+            "blk.0.attn_q.weight",
+            vec![1.0; 128],
+            vec![128],
+        )];
+        let config = ExportConfig::new(ExportFormat::TernaryG128, "ternary-model");
+        let bytes = export_to_gguf(&tensors, &config, &[]).expect("export");
+        let magic = u32::from_le_bytes(bytes[0..4].try_into().expect("slice"));
+        assert_eq!(magic, 0x4655_4747, "expected GGUF magic");
+    }
+
+    #[test]
+    fn test_ternary_g128_fp32_exception_tensors_stay_fp32() {
+        // output_norm.weight should stay F32 even under TernaryG128.
+        let tensors = vec![
+            WeightTensor::new("blk.0.attn_q.weight", vec![1.0; 128], vec![128]),
+            WeightTensor::new("output_norm.weight", vec![1.0; 128], vec![128]),
+        ];
+        let config = ExportConfig::new(ExportFormat::TernaryG128, "m")
+            .with_fp32_layers(vec!["output_norm.weight".to_string()]);
+        let stats = export_stats(&tensors, &config);
+        assert_eq!(stats.fp32_tensors, 1, "output_norm.weight should stay FP32");
+        assert_eq!(
+            stats.quantized_tensors, 1,
+            "attn_q.weight should be ternary-quantized"
+        );
     }
 }

@@ -183,6 +183,21 @@ mod cli {
             #[arg(short, long)]
             model: String,
         },
+
+        /// Convert a HuggingFace safetensors model to GGUF format.
+        Convert {
+            /// Input directory containing model.safetensors (or shards) and config.json.
+            #[arg(long)]
+            from: String,
+
+            /// Output GGUF file path.
+            #[arg(long)]
+            to: String,
+
+            /// Quantization format: tq2_0_g128 (default), q1_0_g128.
+            #[arg(long, default_value = "tq2_0_g128")]
+            quant: String,
+        },
     }
 
     pub fn read_prompt_stdin() -> String {
@@ -242,6 +257,7 @@ mod cli {
                     top_k,
                     top_p,
                     repetition_penalty: 1.1,
+                    ..oxibonsai_runtime::sampling::SamplingParams::default()
                 };
 
                 let mut engine = oxibonsai_runtime::InferenceEngine::from_gguf(
@@ -415,6 +431,7 @@ mod cli {
                     top_k,
                     top_p,
                     repetition_penalty: 1.1,
+                    ..oxibonsai_runtime::sampling::SamplingParams::default()
                 };
 
                 let mut engine = oxibonsai_runtime::InferenceEngine::from_gguf(
@@ -561,6 +578,18 @@ mod cli {
                 let config = oxibonsai_core::config::Qwen3Config::from_metadata(&gguf.metadata)?;
                 let type_counts = gguf.tensors.count_by_type();
 
+                // Determine dominant quant type from tensor counts for accurate variant detection.
+                let dominant_type = type_counts
+                    .iter()
+                    .max_by_key(|(_, count)| *count)
+                    .map(|(ty, _)| *ty)
+                    .unwrap_or(oxibonsai_core::GgufTensorType::Q1_0_g128);
+
+                let variant = oxibonsai_model::ModelVariant::from_config_and_sample_tensor_type(
+                    &config,
+                    dominant_type,
+                );
+
                 if json {
                     let tensor_types: std::collections::HashMap<String, usize> = type_counts
                         .iter()
@@ -572,7 +601,8 @@ mod cli {
                         "gguf_version": gguf.header.version,
                         "tensor_count": gguf.header.tensor_count,
                         "metadata_entries": gguf.header.metadata_kv_count,
-                        "architecture": "Qwen3",
+                        "architecture": format!("Qwen3 ({})", variant.name()),
+                        "variant": variant.name(),
                         "num_layers": config.num_layers,
                         "hidden_size": config.hidden_size,
                         "num_attention_heads": config.num_attention_heads,
@@ -591,7 +621,7 @@ mod cli {
                     println!("Metadata entries: {}", gguf.header.metadata_kv_count);
                     println!();
 
-                    println!("Architecture: Qwen3 (Bonsai-8B)");
+                    println!("Architecture: Qwen3 ({})", variant.name());
                     println!("  Layers:       {}", config.num_layers);
                     println!("  Hidden size:  {}", config.hidden_size);
                     println!("  Q heads:      {}", config.num_attention_heads);
@@ -625,6 +655,7 @@ mod cli {
                     top_k: 40,
                     top_p: 0.9,
                     repetition_penalty: 1.0,
+                    ..SamplingParams::default()
                 };
 
                 let mut engine =
@@ -704,6 +735,25 @@ mod cli {
                      ({compression_ratio:.0}:1 compression)"
                 );
                 println!("Output: {output}");
+            }
+
+            Commands::Convert { from, to, quant } => {
+                use std::path::Path;
+                let from_path = Path::new(&from);
+                let to_path = Path::new(&to);
+                if !from_path.exists() {
+                    anyhow::bail!("input directory not found: {from}");
+                }
+                println!("Converting {from} -> {to} (quant: {quant})");
+                let stats =
+                    oxibonsai_model::convert::convert_hf_to_gguf(from_path, to_path, &quant)?;
+                println!(
+                    "Done: {} tensors ({} ternary + {} fp32), output: {:.1} MB",
+                    stats.n_tensors,
+                    stats.n_ternary,
+                    stats.n_fp32,
+                    stats.output_bytes as f64 / (1024.0 * 1024.0),
+                );
             }
 
             Commands::Validate { model } => {

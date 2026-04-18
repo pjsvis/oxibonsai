@@ -50,6 +50,43 @@ impl MetalGraph {
             .dispatch_thread_groups(MTLSize::new(tg_count as u64, 1, 1), MTLSize::new(256, 1, 1));
     }
 
+    /// Dispatch `gemv_tq2_g128_v1` (SIMD-group-per-row) into the given encoder.
+    ///
+    /// Identical threading shape to `gemv_q1_g128_v7` (8 rows/threadgroup,
+    /// 256 threads), but operates on TQ2_0_g128 (ternary) weights in SoA
+    /// layout `[N×2B scales][N×32B qs]`.
+    ///
+    /// Buffer layout:
+    /// - buffer(0) = soa_raw (u8 SoA TQ2 weights)
+    /// - buffer(1) = input (f32, read as float4* by the kernel)
+    /// - buffer(2) = output (f32)
+    /// - buffer(3) = n_rows (u32, set_bytes)
+    /// - buffer(4) = k (u32, set_bytes)
+    ///
+    /// Dispatch: `[ceil(n_rows/8), 1, 1]` threadgroups, `[256, 1, 1]` threads.
+    pub(crate) fn dispatch_gemv_tq2(
+        &self,
+        encoder: &metal::ComputeCommandEncoderRef,
+        blocks: &Buffer,
+        input: &Buffer,
+        output: &Buffer,
+        n_rows: u32,
+        k: u32,
+    ) {
+        encoder.set_compute_pipeline_state(&self.pipelines.gemv_tq2_g128_v1);
+        encoder.set_buffer(0, Some(blocks), 0);
+        encoder.set_buffer(1, Some(input), 0);
+        encoder.set_buffer(2, Some(output), 0);
+        unsafe {
+            set_scalar(encoder, 3, &n_rows);
+            set_scalar(encoder, 4, &k);
+        }
+
+        let tg_count = div_ceil(n_rows as usize, 8);
+        encoder
+            .dispatch_thread_groups(MTLSize::new(tg_count as u64, 1, 1), MTLSize::new(256, 1, 1));
+    }
+
     /// Dispatch fused GEMV + residual add: `output[row] = residual[row] + gemv(blocks, input)[row]`.
     ///
     /// V7 single-row: fully unrolled inner loop.
@@ -476,6 +513,32 @@ impl MetalGraph {
             MTLSize::new(tg_x, batch_size as u64, 1),
             MTLSize::new(256, 1, 1),
         );
+    }
+
+    /// Dispatch single-vector SwiGLU using the `batched_swiglu` pipeline with `batch_size=1`.
+    ///
+    /// Thin convenience wrapper for the ternary decode path: the TQ2 GEMV produces a
+    /// `2 × inter` gate-up buffer, after which `silu(gate) * up` is applied element-wise
+    /// to yield the `inter`-wide FFN activation. Mirrors the Q1 fused `fused_gate_up_swiglu_q1`
+    /// kernel's post-projection behaviour but as a separate dispatch (since ternary lacks
+    /// a fused variant).
+    ///
+    /// Buffer layout:
+    /// - buffer(0) = gate_up_buf (f32, `2 × inter`, gate in `[0, inter)`, up in `[inter, 2·inter)`)
+    /// - buffer(1) = output_buf  (f32, `inter`, receives `silu(gate) * up`)
+    /// - buffer(2) = inter       (u32, set_bytes)
+    /// - buffer(3) = batch_size  (u32, set_bytes, always `1`)
+    ///
+    /// Dispatch: `[ceil(inter / 256), 1, 1]` threadgroups, `[256, 1, 1]` threads.
+    #[allow(dead_code)]
+    pub(crate) fn dispatch_swiglu_single(
+        &self,
+        encoder: &metal::ComputeCommandEncoderRef,
+        gate_up_buf: &Buffer,
+        output_buf: &Buffer,
+        inter: u32,
+    ) {
+        self.dispatch_batched_swiglu(encoder, gate_up_buf, output_buf, inter, 1);
     }
 
     /// Dispatch batched RMSNorm for `batch_size` position vectors.

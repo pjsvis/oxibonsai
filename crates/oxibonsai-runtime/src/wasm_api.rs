@@ -174,6 +174,7 @@ fn run_inference(request_json: &str) -> Result<Vec<u32>, String> {
         top_k: req.top_k,
         top_p: req.top_p,
         repetition_penalty: 1.1,
+        ..SamplingParams::default()
     };
 
     let mut engine = InferenceEngine::new(config, sampling, req.seed);

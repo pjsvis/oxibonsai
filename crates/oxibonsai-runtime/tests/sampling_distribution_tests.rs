@@ -84,6 +84,7 @@ fn temperature_1_distribution_matches_softmax() {
         top_k: 0,
         top_p: 1.0,
         repetition_penalty: 1.0,
+        max_tokens: 128,
     };
 
     let mut sampler = Sampler::new(params, 42);
@@ -114,6 +115,7 @@ fn temperature_1_token_0_most_frequent() {
         top_k: 0,
         top_p: 1.0,
         repetition_penalty: 1.0,
+        max_tokens: 128,
     };
 
     let mut sampler = Sampler::new(params, 42);
@@ -149,6 +151,7 @@ fn temperature_zero_always_greedy() {
         top_k: 0,
         top_p: 1.0,
         repetition_penalty: 1.0,
+        max_tokens: 128,
     };
 
     let mut sampler = Sampler::new(params, 42);
@@ -174,6 +177,7 @@ fn temperature_very_high_approaches_uniform() {
         top_k: 0,
         top_p: 1.0,
         repetition_penalty: 1.0,
+        max_tokens: 128,
     };
 
     let mut sampler = Sampler::new(params, 42);
@@ -210,6 +214,7 @@ fn temperature_chi_square_goodness_of_fit() {
             top_k: 0,
             top_p: 1.0,
             repetition_penalty: 1.0,
+            max_tokens: 128,
         };
 
         let mut sampler = Sampler::new(params, 777);
@@ -243,6 +248,7 @@ fn top_k_1_always_selects_argmax() {
         top_k: 1,
         top_p: 1.0,
         repetition_penalty: 1.0,
+        max_tokens: 128,
     };
 
     let mut sampler = Sampler::new(params, 42);
@@ -269,6 +275,7 @@ fn top_k_2_only_selects_top_two() {
         top_k: 2,
         top_p: 1.0,
         repetition_penalty: 1.0,
+        max_tokens: 128,
     };
 
     let mut sampler = Sampler::new(params, 42);
@@ -310,6 +317,7 @@ fn top_k_full_vocab_selects_all() {
         top_k: 4, // same as vocab size
         top_p: 1.0,
         repetition_penalty: 1.0,
+        max_tokens: 128,
     };
 
     let mut sampler = Sampler::new(params, 42);
@@ -341,6 +349,7 @@ fn top_k_filtered_tokens_never_appear() {
         top_k: 2,
         top_p: 1.0,
         repetition_penalty: 1.0,
+        max_tokens: 128,
     };
 
     let mut sampler = Sampler::new(params, 42);
@@ -371,6 +380,7 @@ fn top_p_small_selects_dominant_token() {
         top_k: 0,
         top_p: 0.5,
         repetition_penalty: 1.0,
+        max_tokens: 128,
     };
 
     let mut sampler = Sampler::new(params, 42);
@@ -404,6 +414,7 @@ fn top_p_uniform_selects_subset() {
         top_k: 0,
         top_p: 0.5,
         repetition_penalty: 1.0,
+        max_tokens: 128,
     };
 
     let mut sampler = Sampler::new(params, 42);
@@ -436,6 +447,7 @@ fn top_p_1_allows_all_tokens() {
         top_k: 0,
         top_p: 1.0,
         repetition_penalty: 1.0,
+        max_tokens: 128,
     };
 
     let mut sampler = Sampler::new(params, 42);
@@ -486,6 +498,7 @@ fn repetition_penalty_reduces_seen_token_probability() {
         top_k: 0,
         top_p: 1.0,
         repetition_penalty: 1.0,
+        max_tokens: 128,
     };
 
     let mut sampler_no = Sampler::new(params_no, 42);
@@ -507,6 +520,7 @@ fn repetition_penalty_reduces_seen_token_probability() {
         top_k: 0,
         top_p: 1.0,
         repetition_penalty: 1.0,
+        max_tokens: 128,
     };
 
     let mut sampler_pen = Sampler::new(params_pen, 42);
@@ -544,6 +558,7 @@ fn repetition_penalty_statistical_effect() {
             top_k: 0,
             top_p: 1.0,
             repetition_penalty: 1.0,
+            max_tokens: 128,
         },
         42,
     );
@@ -567,6 +582,7 @@ fn repetition_penalty_statistical_effect() {
             top_k: 0,
             top_p: 1.0,
             repetition_penalty: 1.0,
+            max_tokens: 128,
         },
         42,
     );
@@ -736,6 +752,7 @@ fn top_k_3_excludes_bottom_tokens_statistically() {
         top_k: 3,
         top_p: 1.0,
         repetition_penalty: 1.0,
+        max_tokens: 128,
     };
 
     let mut sampler = Sampler::new(params, 42);

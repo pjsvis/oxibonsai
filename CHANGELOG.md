@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.1] - 2026-04-18
+
+### Added
+- Native CUDA NVRTC backend with fused Q1 + TQ2 full-forward path (~21.9 tok/s on Ternary-Bonsai-1.7B : RTX 3060 CUDA 12.8)
+- Fused Metal TQ2 full-forward — single GPU command buffer per token, ~50 tok/s on Ternary-Bonsai-1.7B (~13× speedup)
+- Ternary CPU SIMD tiers (NEON/AVX2/AVX-512 TQ2 GEMV)
+- TQ2_0_g128 support in the Metal backend (per-kernel dispatch + `blocks_as_bytes_ternary` zero-copy upload)
+- `scripts/bench_ternary.sh` — CPU vs Metal throughput bench (3-run average + best)
+- `scripts/download_ternary.sh` — fetch + convert safetensors → GGUF
+
+### Changed
+- Version bump to 0.1.1
+- Internal dependency version alignment across workspace
+- CUDA full-forward layer parameter handling refactored for cleaner weight management
+- Workspace Cargo.toml files unified on workspace dependencies for better crate compatibility
+
+### Fixed
+- Workspace version consistency across all subcrates
+- `blocks_as_bytes` import gating for broader feature-flag compatibility
+
 ## [0.1.0] - 2026-04-13
 
 ### Added
@@ -27,4 +47,5 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Comprehensive test suite (140 tests)
 - Cross-platform support (macOS, Linux, Windows, WASM)
 
+[0.1.1]: https://github.com/cool-japan/oxibonsai/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/cool-japan/oxibonsai/releases/tag/v0.1.0

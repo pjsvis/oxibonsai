@@ -1,11 +1,12 @@
 # oxibonsai-serve TODO
 
 > Standalone HTTP server: argument parsing, banner, server entry point
-> 4 files, ~510 lines, 29 tests
+> 4 files, ~510 lines, 29 tests (all passing)
+> Version 0.1.1 — last reviewed 2026-04-18
 
-## Status: ✅ All Features Complete
+## Status: ✅ All Features Complete (Alpha)
 
-Minimal standalone server binary with pure Rust argument parsing (zero clap dependency) and comprehensive flag handling.
+Minimal standalone server binary with pure Rust argument parsing (zero clap dependency) and comprehensive flag handling. Delegates engine and HTTP stack to `oxibonsai-runtime`.
 
 ## Done
 

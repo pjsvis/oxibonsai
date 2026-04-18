@@ -1,9 +1,11 @@
 # oxibonsai-eval TODO
 
 > Model evaluation harness: perplexity, accuracy, ROUGE, throughput metrics
-> 9 files, ~2,100 lines, 38 tests
+> 9 files, ~2,100 lines, 38 tests passing
+> Version: 0.1.1 — Status: Alpha
+> Last updated: 2026-04-18
 
-## Status: ✅ All Features Complete
+## Status: Alpha — Core features complete
 
 Full evaluation framework with perplexity, multiple-choice accuracy, ROUGE scoring, throughput benchmarking, and dataset loading.
 

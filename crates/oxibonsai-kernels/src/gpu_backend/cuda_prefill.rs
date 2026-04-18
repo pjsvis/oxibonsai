@@ -279,7 +279,11 @@ fn acquire_prefill_buffers(
         });
     } else {
         // Reusing existing allocation — just update the active batch size.
-        guard.as_mut().unwrap().actual_batch_size = batch_size;
+        // SAFETY: needs_alloc is false only when guard is Some(b), so this is infallible.
+        guard
+            .as_mut()
+            .expect("guard is Some when needs_alloc is false")
+            .actual_batch_size = batch_size;
     }
 
     Ok(guard)

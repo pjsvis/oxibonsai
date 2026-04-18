@@ -8,23 +8,32 @@ Prometheus metrics, circuit breaker, and comprehensive configuration.
 
 Part of the [OxiBonsai](https://github.com/cool-japan/oxibonsai) project.
 
+## Status
+
+**Stable** — 1,040 tests passing (`cargo nextest run -p oxibonsai-runtime --all-features`), version 0.1.1.
+
 ## Features
 
-- `InferenceEngine` — prefill + autoregressive decode loop
+- `Engine` / `InferenceEngine` — prefill + autoregressive decode loop
 - `EngineBuilder` / `ConfigBuilder` / `SamplerBuilder` — ergonomic builder API
+- Sampling: greedy, top-k, top-p, temperature, repetition penalty, `LcgRng`
 - Sampling presets: Greedy, Balanced, Creative, Code
 - Advanced samplers: Mirostat v1/v2, Locally Typical, Eta, Min-P, adaptive
 - `SamplerChain` — composable sampling pipeline
 - Speculative decoding with draft/verify loop
 - Beam search with configurable width, length penalty, n-gram blocking
-- Token healing and context window management
+- Token healing, constrained decoding, JSON schema guidance
+- Context window management and token budget tracking
+- Continuous batching, prefix cache engine, semantic cache
 - `InferencePipeline` — high-level generation API with stop reasons
-- OpenAI-compatible `/v1/chat/completions`, `/v1/completions`, `/v1/embeddings`
-- SSE streaming for real-time token output
+- Streaming generation (`generate_streaming`) with SSE delivery
+- OpenAI-compatible `/v1/chat/completions`, `/v1/completions`, `/v1/embeddings`, `/v1/models`
+- RAG endpoints (`/v1/rag/*`) and admin API (`/admin/*`)
 - Rate limiting, circuit breaker, CORS, tower middleware
-- Admin API: `/admin/status`, `/admin/config`, `/admin/cache-stats`
 - Prometheus metrics (`/metrics`): tokens/s, latency, request counts
 - Health endpoint (`/health`) with readiness probes
+- Memory profiler (RSS via Mach on macOS / statm on Linux)
+- Quality metrics, auto-tuner, hot reload, model cache, multi-model
 - TOML configuration with layered loading (defaults → file → CLI)
 
 ## Feature Flags
@@ -35,12 +44,13 @@ Part of the [OxiBonsai](https://github.com/cool-japan/oxibonsai) project.
 | `rag` | RAG server endpoints | disabled |
 | `wasm` | WASM-safe build | disabled |
 | `metal` | Metal GPU backend | disabled |
+| `native-cuda` | Native CUDA backend | disabled |
 
 ## Usage
 
 ```toml
 [dependencies]
-oxibonsai-runtime = "0.1.0"
+oxibonsai-runtime = "0.1.1"
 ```
 
 ```rust

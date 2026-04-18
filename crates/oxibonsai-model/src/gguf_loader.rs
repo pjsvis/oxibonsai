@@ -112,7 +112,9 @@ const KNOWN_QUANT_TYPES: &[(u32, &str)] = &[
     (14, "Q6_K"),
     (15, "Q8_K"),
     (30, "BF16"),
+    (35, "TQ2_0"),
     (41, "Q1_0_g128"),
+    (42, "TQ2_0_g128"),
 ];
 
 /// A loaded tensor entry — contains metadata only; no weight bytes are held here.
@@ -353,7 +355,9 @@ fn compute_tensor_size_bytes(shape: &[u64], quant_type_id: u32) -> u64 {
         14 => (256, 210), // Q6_K
         15 => (256, 292), // Q8_K
         30 => (1, 2),     // BF16
+        35 => (256, 66),  // TQ2_0 (llama.cpp ternary, 256-element groups)
         41 => (128, 18),  // Q1_0_g128
+        42 => (128, 34),  // TQ2_0_g128 (PrismML ternary, 128-element groups)
         // Unknown type: assume 1 byte per element as a conservative fallback
         _ => (1, 1),
     };

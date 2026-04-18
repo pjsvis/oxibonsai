@@ -609,6 +609,113 @@ extern "C" __global__ void gemv_q1_g128_v9(
 }
 
 /* =========================================================================
+   Kernel TQ2 — gemv_tq2_g128_v1
+   Ternary (TQ2_0_g128) GEMV.  SoA layout:
+     [scales: n_rows * n_blocks * 2 bytes FP16 LE]
+     [qs:     n_rows * n_blocks * 32 bytes  (4 codes/byte, 0b00→-1, 0b01→0, 0b10→+1, 0b11→0)]
+
+   Grid:  (ceil(n_rows/8), 1, 1)   — 8 output rows per CTA
+   Block: (256, 1, 1)              — 8 warps × 32 lanes
+   Each lane processes blocks: lane, lane+32, … via 128-bit vector loads of qs.
+   ========================================================================= */
+static __device__ __forceinline__ float decode_tq2(unsigned int code) {
+    /* 0b00 → -1, 0b10 → +1, others → 0  (codes 0b01 and 0b11 are zero values) */
+    return (code == 0u) ? -1.0f : ((code == 2u) ? 1.0f : 0.0f);
+}
+
+static __device__ __forceinline__ float byte_dot_tq2(unsigned int b, const float* x) {
+    return decode_tq2((b      ) & 3u) * x[0]
+         + decode_tq2((b >> 2u) & 3u) * x[1]
+         + decode_tq2((b >> 4u) & 3u) * x[2]
+         + decode_tq2((b >> 6u) & 3u) * x[3];
+}
+
+extern "C" __global__ void gemv_tq2_g128_v1(
+    const unsigned char* __restrict__ soa_raw,
+    const float*         __restrict__ input,
+    float*               __restrict__ output,
+    unsigned int n_rows,
+    unsigned int k
+) {
+    const unsigned int warp_id = threadIdx.x >> 5u;
+    const unsigned int lane    = threadIdx.x & 31u;
+    const unsigned int row     = blockIdx.x * 8u + warp_id;
+    if (row >= n_rows) return;
+
+    const unsigned int blocks_per_row = k >> 7u;
+    const unsigned long long total_blocks = (unsigned long long)n_rows * blocks_per_row;
+    const unsigned long long qs_offset    = total_blocks * 2u;
+
+    const unsigned short* __restrict__ scales =
+        (const unsigned short* __restrict__)soa_raw;
+
+    float partial = 0.0f;
+
+    for (unsigned int b = lane; b < blocks_per_row; b += 32u) {
+        const unsigned long long block_idx = (unsigned long long)row * blocks_per_row + b;
+        const float scale = fast_fp16_to_float(__ldg(&scales[block_idx]));
+
+        /* qs is 32 bytes per block, naturally 4-byte aligned (qs_offset = 2 * total_blocks
+           which is a multiple of 4 once n_rows*blocks_per_row is even — true for all
+           Qwen3 weight tensors). Use 2× 128-bit vector loads for 8 u32s = 32 bytes. */
+        const unsigned int* qs_words =
+            (const unsigned int*)(soa_raw + qs_offset + block_idx * 32u);
+        unsigned int w0, w1, w2, w3, w4, w5, w6, w7;
+        asm("ld.global.nc.v4.u32 {%0,%1,%2,%3}, [%4];"
+            : "=r"(w0), "=r"(w1), "=r"(w2), "=r"(w3)
+            : "l"((unsigned long long)qs_words));
+        asm("ld.global.nc.v4.u32 {%0,%1,%2,%3}, [%4];"
+            : "=r"(w4), "=r"(w5), "=r"(w6), "=r"(w7)
+            : "l"((unsigned long long)(qs_words + 4)));
+
+        const float* x = input + b * 128u;
+        float block_sum =
+            byte_dot_tq2((w0      ) & 0xFFu, x +   0u)
+          + byte_dot_tq2((w0 >>  8u) & 0xFFu, x +   4u)
+          + byte_dot_tq2((w0 >> 16u) & 0xFFu, x +   8u)
+          + byte_dot_tq2((w0 >> 24u) & 0xFFu, x +  12u)
+          + byte_dot_tq2((w1      ) & 0xFFu, x +  16u)
+          + byte_dot_tq2((w1 >>  8u) & 0xFFu, x +  20u)
+          + byte_dot_tq2((w1 >> 16u) & 0xFFu, x +  24u)
+          + byte_dot_tq2((w1 >> 24u) & 0xFFu, x +  28u)
+          + byte_dot_tq2((w2      ) & 0xFFu, x +  32u)
+          + byte_dot_tq2((w2 >>  8u) & 0xFFu, x +  36u)
+          + byte_dot_tq2((w2 >> 16u) & 0xFFu, x +  40u)
+          + byte_dot_tq2((w2 >> 24u) & 0xFFu, x +  44u)
+          + byte_dot_tq2((w3      ) & 0xFFu, x +  48u)
+          + byte_dot_tq2((w3 >>  8u) & 0xFFu, x +  52u)
+          + byte_dot_tq2((w3 >> 16u) & 0xFFu, x +  56u)
+          + byte_dot_tq2((w3 >> 24u) & 0xFFu, x +  60u)
+          + byte_dot_tq2((w4      ) & 0xFFu, x +  64u)
+          + byte_dot_tq2((w4 >>  8u) & 0xFFu, x +  68u)
+          + byte_dot_tq2((w4 >> 16u) & 0xFFu, x +  72u)
+          + byte_dot_tq2((w4 >> 24u) & 0xFFu, x +  76u)
+          + byte_dot_tq2((w5      ) & 0xFFu, x +  80u)
+          + byte_dot_tq2((w5 >>  8u) & 0xFFu, x +  84u)
+          + byte_dot_tq2((w5 >> 16u) & 0xFFu, x +  88u)
+          + byte_dot_tq2((w5 >> 24u) & 0xFFu, x +  92u)
+          + byte_dot_tq2((w6      ) & 0xFFu, x +  96u)
+          + byte_dot_tq2((w6 >>  8u) & 0xFFu, x + 100u)
+          + byte_dot_tq2((w6 >> 16u) & 0xFFu, x + 104u)
+          + byte_dot_tq2((w6 >> 24u) & 0xFFu, x + 108u)
+          + byte_dot_tq2((w7      ) & 0xFFu, x + 112u)
+          + byte_dot_tq2((w7 >>  8u) & 0xFFu, x + 116u)
+          + byte_dot_tq2((w7 >> 16u) & 0xFFu, x + 120u)
+          + byte_dot_tq2((w7 >> 24u) & 0xFFu, x + 124u);
+
+        partial += scale * block_sum;
+    }
+
+    partial += __shfl_down_sync(0xffffffffu, partial, 16u);
+    partial += __shfl_down_sync(0xffffffffu, partial,  8u);
+    partial += __shfl_down_sync(0xffffffffu, partial,  4u);
+    partial += __shfl_down_sync(0xffffffffu, partial,  2u);
+    partial += __shfl_down_sync(0xffffffffu, partial,  1u);
+
+    if (lane == 0u) output[row] = partial;
+}
+
+/* =========================================================================
    Kernel 11 — gemv_q1_g128_v9_residual
    V9 GEMV + fused residual add.  output[row] = dot(weight[row], input) + residual[row]
    ========================================================================= */

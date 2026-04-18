@@ -123,3 +123,104 @@ pub trait OneBitKernel: Send + Sync {
         Ok(false)
     }
 }
+
+/// Ternary ({-1, 0, +1}) weight matrix kernel operations.
+///
+/// Parallel to [`OneBitKernel`] for TQ2\_0\_g128-format weight matrices.
+/// Each kernel tier (reference, AVX2, AVX-512, NEON) implements this trait,
+/// and [`crate::KernelDispatcher`] delegates to the best available tier.
+pub trait TernaryKernel: Send + Sync {
+    /// Dequantize TQ2\_0\_g128 blocks to FP32 values.
+    ///
+    /// For each block: `output[i] = scale * ternary_code[i]`
+    /// where codes map as `0b00→-1`, `0b01→0`, `0b10→+1`, `0b11→0`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::error::KernelError::BufferTooSmall`] if `output` is shorter
+    /// than `blocks.len() * 128`.
+    fn dequant_ternary_g128(
+        &self,
+        blocks: &[oxibonsai_core::BlockTQ2_0_g128],
+        output: &mut [f32],
+    ) -> KernelResult<()>;
+
+    /// Fused ternary matrix × FP32 vector product (GEMV).
+    ///
+    /// Computes `output[row] = sum_col(weight[row, col] * input[col])`
+    /// where weights are TQ2\_0\_g128 packed.
+    ///
+    /// - `blocks`: Row-major packed weight blocks, `n_rows * (k / 128)` blocks total.
+    /// - `input`: FP32 input vector of length `k`.
+    /// - `output`: FP32 output vector of length `n_rows`.
+    /// - `n_rows`: Number of output rows (N dimension).
+    /// - `k`: Inner dimension (must be multiple of 128).
+    ///
+    /// # Errors
+    ///
+    /// - [`crate::error::KernelError::NotBlockAligned`] if `k % 128 != 0`.
+    /// - [`crate::error::KernelError::DimensionMismatch`] if `input` or `blocks` are too short.
+    /// - [`crate::error::KernelError::BufferTooSmall`] if `output` is too short.
+    fn gemv_ternary_g128(
+        &self,
+        blocks: &[oxibonsai_core::BlockTQ2_0_g128],
+        input: &[f32],
+        output: &mut [f32],
+        n_rows: usize,
+        k: usize,
+    ) -> KernelResult<()>;
+
+    /// Fused ternary matrix × FP32 matrix product (GEMM).
+    ///
+    /// Computes `output[m, n] = sum_k(weight[n, k] * input[m, k])`
+    ///
+    /// - `blocks`: Weight blocks in row-major order, `n_rows * (k / 128)` blocks.
+    /// - `input`: Row-major FP32 input [m × k].
+    /// - `output`: Row-major FP32 output [m × n\_rows].
+    /// - `m`: Batch/sequence dimension.
+    /// - `n_rows`: Number of weight matrix rows (output columns).
+    /// - `k`: Inner dimension (must be multiple of 128).
+    ///
+    /// # Errors
+    ///
+    /// - [`crate::error::KernelError::NotBlockAligned`] if `k % 128 != 0`.
+    /// - [`crate::error::KernelError::DimensionMismatch`] if dimensions mismatch.
+    /// - [`crate::error::KernelError::BufferTooSmall`] if any buffer is too small.
+    fn gemm_ternary_g128(
+        &self,
+        blocks: &[oxibonsai_core::BlockTQ2_0_g128],
+        input: &[f32],
+        output: &mut [f32],
+        m: usize,
+        n_rows: usize,
+        k: usize,
+    ) -> KernelResult<()>;
+
+    /// Upload TQ2_0_g128 weight blocks to GPU memory for future cached GEMV calls.
+    ///
+    /// Returns `Some(handle)` if the kernel supports GPU caching (the GPU tier),
+    /// or `None` for CPU-only tiers.
+    fn upload_weights_ternary(
+        &self,
+        _blocks: &[oxibonsai_core::BlockTQ2_0_g128],
+    ) -> Option<crate::weight_cache::GpuWeightHandle> {
+        None
+    }
+
+    /// GEMV using a pre-uploaded ternary weight buffer (no host→device copy for weights).
+    ///
+    /// Falls back to `Err(UnsupportedOperation)` by default; only the GPU tier
+    /// overrides this.
+    fn gemv_ternary_g128_cached(
+        &self,
+        _handle: crate::weight_cache::GpuWeightHandle,
+        _input: &[f32],
+        _output: &mut [f32],
+        _n_rows: usize,
+        _k: usize,
+    ) -> KernelResult<()> {
+        Err(crate::error::KernelError::UnsupportedOperation(
+            "gemv_ternary_g128_cached not supported by this kernel tier".into(),
+        ))
+    }
+}

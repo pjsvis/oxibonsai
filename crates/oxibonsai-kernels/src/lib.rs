@@ -48,8 +48,9 @@ pub use gpu_backend::{
 pub use gpu_backend::{
     build_cached_weights, print_gpu_profile_summary, try_metal_ffn, try_metal_full_forward,
     try_metal_full_forward_cached, try_metal_full_forward_prefill,
-    try_metal_full_forward_prefill_verify, try_metal_full_layer, try_metal_qkv, CachedLayerWeights,
-    CachedModelWeights, FullForwardLayerParams, MetalGraph, MetalGraphError, MetalWeightHandle,
+    try_metal_full_forward_prefill_verify, try_metal_full_forward_ternary, try_metal_full_layer,
+    try_metal_qkv, CachedLayerWeights, CachedModelWeights, FullForwardLayerParams,
+    FullForwardLayerParamsTernary, MetalGraph, MetalGraphError, MetalWeightHandle,
 };
 
 #[cfg(all(
@@ -63,10 +64,13 @@ pub use gpu_backend::{
 };
 
 pub mod dequant;
+pub mod dequant_ternary;
 pub mod dispatch;
 pub mod error;
 pub mod gemm;
+pub mod gemm_ternary;
 pub mod gemv;
+pub mod gemv_ternary;
 pub mod packing;
 pub mod parallel;
 pub mod parallel_tiled;
@@ -88,8 +92,10 @@ pub mod tuning;
 pub use aligned::{AlignedBlocks, AlignedBuffer};
 pub use dispatch::KernelDispatcher;
 pub use error::{KernelError, KernelResult};
+pub use parallel::{gemm_ternary_g128_par, gemv_ternary_g128_par};
+pub use parallel_tiled::{gemm_adaptive_ternary, gemv_adaptive, gemv_adaptive_ternary};
 pub use prefetch::{PrefetchConfig, PrefetchLocality, PrefetchStrategy};
 pub use simd_float_ops::{rms_norm_simd, rope_apply_simd, silu_simd, softmax_simd, swiglu_simd};
-pub use traits::OneBitKernel;
+pub use traits::{OneBitKernel, TernaryKernel};
 pub use tuning::{PlatformProfile, TunedThresholds, TuningSummary};
 pub use weight_cache::GpuWeightHandle;

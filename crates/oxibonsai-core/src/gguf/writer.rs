@@ -64,7 +64,9 @@ pub use MetadataWriteValue as MetadataValue;
 /// Tensor quantization type codes used by OxiBonsai in GGUF files.
 ///
 /// Note: `Q1_0G128` maps to type ID **41** (the PrismML extension ID used
-/// throughout the existing OxiBonsai reader).
+/// throughout the existing OxiBonsai reader).  `TQ2_0_g128` maps to type
+/// ID **42** (PrismML ternary extension) and `TQ2_0` maps to type ID **35**
+/// (llama.cpp upstream ternary quantization).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u32)]
 #[allow(non_camel_case_types)]
@@ -72,8 +74,12 @@ pub enum TensorType {
     F32 = 0,
     F16 = 1,
     Q4_0 = 2,
+    /// llama.cpp ternary quantization: 256 sign-2 bits + FP16 group scale (upstream ID 35).
+    TQ2_0 = 35,
     /// 1-bit, 128-element groups (OxiBonsai custom; type ID 41).
     Q1_0G128 = 41,
+    /// PrismML ternary quantization: 128 sign-2 bits + FP16 group scale (type ID 42).
+    TQ2_0_g128 = 42,
 }
 
 impl TensorType {
@@ -83,6 +89,8 @@ impl TensorType {
             Self::F32 | Self::F16 => 1,
             Self::Q4_0 => 32,
             Self::Q1_0G128 => 128,
+            Self::TQ2_0_g128 => 128,
+            Self::TQ2_0 => 256,
         }
     }
 
@@ -92,7 +100,9 @@ impl TensorType {
             Self::F32 => 4,
             Self::F16 => 2,
             Self::Q4_0 => 18,
-            Self::Q1_0G128 => 18, // 2 (FP16 scale) + 16 (128 sign bits)
+            Self::Q1_0G128 => 18,   // 2 (FP16 scale) + 16 (128 sign bits)
+            Self::TQ2_0_g128 => 34, // 2 (FP16 scale) + 32 (128 ternary-2bit packed)
+            Self::TQ2_0 => 66,      // 2 (FP16 scale) + 64 (256 ternary-2bit packed)
         }
     }
 

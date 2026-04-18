@@ -64,6 +64,7 @@ fn main() -> anyhow::Result<()> {
         top_k: p.top_k,
         top_p: p.top_p,
         repetition_penalty: p.repetition_penalty,
+        ..SamplingParams::default()
     };
     let mut engine = InferenceEngine::new(config.clone(), custom_params, 999);
     let tokens = engine.generate(&prompt_tokens, max_tokens)?;
@@ -100,6 +101,7 @@ fn main() -> anyhow::Result<()> {
             top_k: 40,
             top_p: 0.9,
             repetition_penalty: rp,
+            ..SamplingParams::default()
         };
         let mut engine = InferenceEngine::new(config.clone(), params, 42);
         let tokens = engine.generate(&prompt_tokens, max_tokens)?;

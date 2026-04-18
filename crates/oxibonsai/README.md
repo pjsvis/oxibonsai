@@ -2,15 +2,17 @@
 
 Pure Rust 1-bit LLM inference engine for PrismML Bonsai models — umbrella crate.
 
+**Status:** Stable (thin re-export facade) · **Version:** 0.1.1 · **Updated:** 2026-04-18
+
 Re-exports all OxiBonsai subcrates for convenience. Add this single dependency
 to get access to the entire OxiBonsai ecosystem:
 
 ```toml
 [dependencies]
-oxibonsai = "0.1.0"
+oxibonsai = "0.1.1"
 
 # Enable optional subsystems:
-oxibonsai = { version = "0.1.0", features = ["full"] }
+oxibonsai = { version = "0.1.1", features = ["full"] }
 ```
 
 ## Subcrates
@@ -19,7 +21,7 @@ oxibonsai = { version = "0.1.0", features = ["full"] }
 |-------|-------------|
 | `oxibonsai-core` | GGUF loader, tensor types, configuration |
 | `oxibonsai-kernels` | 1-bit compute kernels (dequant, GEMV, GEMM, SIMD) |
-| `oxibonsai-model` | Qwen3-8B transformer, KV cache, attention |
+| `oxibonsai-model` | Qwen3 transformer family (1.7B/4B/8B), KV cache, attention |
 | `oxibonsai-runtime` | Inference engine, sampling, OpenAI-compatible server |
 | `oxibonsai-tokenizer` | Pure Rust BPE tokenizer (optional) |
 | `oxibonsai-rag` | Retrieval-augmented generation pipeline (optional) |

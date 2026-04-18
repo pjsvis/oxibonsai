@@ -15,6 +15,7 @@ use crate::error::{KernelError, KernelResult};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::tiled::{optimal_tile_rows, L2_TILE_ROWS};
 use crate::traits::OneBitKernel;
+use crate::traits::TernaryKernel;
 use oxibonsai_core::tensor::{BlockQ1_0G128, QK1_0_G128};
 
 /// Minimum rows to justify parallelism overhead for parallel tiled GEMV.
@@ -299,6 +300,38 @@ pub fn gemv_adaptive(
     }
 }
 
+pub fn gemv_adaptive_ternary(
+    dispatcher: &KernelDispatcher,
+    blocks: &[oxibonsai_core::BlockTQ2_0_g128],
+    input: &[f32],
+    output: &mut [f32],
+    n_rows: usize,
+    k: usize,
+) -> KernelResult<()> {
+    match select_gemv_strategy(n_rows, k) {
+        AdaptiveStrategy::Direct => dispatcher.gemv_ternary_g128(blocks, input, output, n_rows, k),
+        AdaptiveStrategy::ParallelRow | AdaptiveStrategy::ParallelTiled => {
+            crate::parallel::gemv_ternary_g128_par(dispatcher, blocks, input, output, n_rows, k)
+        }
+    }
+}
+
+pub fn gemm_adaptive_ternary(
+    dispatcher: &KernelDispatcher,
+    blocks: &[oxibonsai_core::BlockTQ2_0_g128],
+    input: &[f32],
+    output: &mut [f32],
+    m: usize,
+    n_rows: usize,
+    k: usize,
+) -> KernelResult<()> {
+    if m < PAR_TILED_MIN_BATCH {
+        dispatcher.gemm_ternary_g128(blocks, input, output, m, n_rows, k)
+    } else {
+        crate::parallel::gemm_ternary_g128_par(dispatcher, blocks, input, output, m, n_rows, k)
+    }
+}
+
 // ─── Parallel configuration ────────────────────────────────────────────
 
 /// Runtime info about parallel execution configuration.
@@ -377,6 +410,10 @@ mod tests {
         }
         let input: Vec<f32> = (0..k).map(|i| (i as f32 * 0.01) - 1.28).collect();
         (blocks, input)
+    }
+
+    fn make_ternary_block(qs: [u8; 32]) -> oxibonsai_core::BlockTQ2_0_g128 {
+        oxibonsai_core::BlockTQ2_0_g128 { qs, d: f16::ONE }
     }
 
     #[test]
@@ -509,6 +546,32 @@ mod tests {
                 out_adaptive[i]
             );
         }
+    }
+
+    #[test]
+    fn adaptive_ternary_gemv_small_is_direct() -> KernelResult<()> {
+        let n_rows = 16;
+        let k = 128;
+        let blocks_per_row = k / oxibonsai_core::QK_TQ2_0_G128;
+        let blocks = vec![make_ternary_block([0xAAu8; 32]); n_rows * blocks_per_row];
+        let input: Vec<f32> = (0..k).map(|i| (i as f32 * 0.01) - 1.28).collect();
+        let dispatcher = KernelDispatcher::auto_detect();
+        let mut output = vec![0.0f32; n_rows];
+
+        gemv_adaptive_ternary(&dispatcher, &blocks, &input, &mut output, n_rows, k)
+    }
+
+    #[test]
+    fn adaptive_ternary_gemv_large_is_parallel() -> KernelResult<()> {
+        let n_rows = 512;
+        let k = 128;
+        let blocks_per_row = k / oxibonsai_core::QK_TQ2_0_G128;
+        let blocks = vec![make_ternary_block([0xAAu8; 32]); n_rows * blocks_per_row];
+        let input: Vec<f32> = (0..k).map(|i| (i as f32 * 0.01) - 1.28).collect();
+        let dispatcher = KernelDispatcher::auto_detect();
+        let mut output = vec![0.0f32; n_rows];
+
+        gemv_adaptive_ternary(&dispatcher, &blocks, &input, &mut output, n_rows, k)
     }
 
     #[test]

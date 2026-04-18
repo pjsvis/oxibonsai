@@ -450,7 +450,8 @@ fn tensor_type_properties() {
 
 #[test]
 fn tensor_type_unknown_id_returns_error() {
-    for bad_id in [4, 5, 16, 20, 29, 31, 40, 42, 100, u32::MAX] {
+    // Note: 35=TQ2_0, 41=Q1_0_g128, 42=TQ2_0_g128 are valid; excluded here.
+    for bad_id in [4, 5, 16, 20, 29, 31, 40, 43, 100, u32::MAX] {
         let result = GgufTensorType::from_id(bad_id);
         assert!(result.is_err(), "type id {bad_id} should be unsupported");
     }

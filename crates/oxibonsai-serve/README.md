@@ -1,10 +1,13 @@
 # oxibonsai-serve
 
+**Status:** Alpha — **Version:** 0.1.1 — **Tests:** 29 passing
+
 Standalone OpenAI-compatible inference server for OxiBonsai.
 
 Binary crate providing an HTTP server with `/v1/chat/completions` endpoint,
 configurable host/port, model path, sampling parameters, and structured logging.
-Uses pure `std::env` argument parsing — no clap dependency.
+Uses pure `std::env` argument parsing — no clap dependency. Delegates the
+engine and HTTP stack to [`oxibonsai-runtime`](../oxibonsai-runtime).
 
 Part of the [OxiBonsai](https://github.com/cool-japan/oxibonsai) project.
 

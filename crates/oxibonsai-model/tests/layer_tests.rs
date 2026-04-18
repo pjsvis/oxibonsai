@@ -15,8 +15,8 @@ fn make_block(scale: f32, bits: [u8; 16]) -> BlockQ1_0G128 {
     }
 }
 
-fn ref_kernel() -> KernelDispatcher {
-    KernelDispatcher::with_tier(KernelTier::Reference)
+fn ref_kernel() -> std::sync::Arc<KernelDispatcher> {
+    std::sync::Arc::new(KernelDispatcher::with_tier(KernelTier::Reference))
 }
 
 // ══════════════════════════════════════════════════════════════
@@ -315,14 +315,12 @@ fn swiglu_zero_up_zeroes_output() {
 fn linear_1bit_all_positive_weights() {
     // 1 output feature, 128 input features, all bits set = +scale
     let blocks = vec![make_block(1.0, [0xFF; 16])];
-    let layer = Linear1Bit::new(&blocks, 1, 128);
     let kernel = ref_kernel();
+    let layer = Linear1Bit::new(&blocks, 1, 128, kernel.clone()).expect("layer");
 
     let input = vec![1.0f32; 128];
     let mut output = vec![0.0f32; 1];
-    layer
-        .forward_vec(&input, &mut output, &kernel)
-        .expect("forward");
+    layer.forward_vec(&input, &mut output).expect("forward");
     // dot(+1*128, [1;128]) = 128
     assert!((output[0] - 128.0).abs() < 1.0);
 }
@@ -331,14 +329,12 @@ fn linear_1bit_all_positive_weights() {
 fn linear_1bit_all_negative_weights() {
     // All bits clear = -scale
     let blocks = vec![make_block(1.0, [0x00; 16])];
-    let layer = Linear1Bit::new(&blocks, 1, 128);
     let kernel = ref_kernel();
+    let layer = Linear1Bit::new(&blocks, 1, 128, kernel.clone()).expect("layer");
 
     let input = vec![1.0f32; 128];
     let mut output = vec![0.0f32; 1];
-    layer
-        .forward_vec(&input, &mut output, &kernel)
-        .expect("forward");
+    layer.forward_vec(&input, &mut output).expect("forward");
     assert!((output[0] + 128.0).abs() < 1.0);
 }
 
@@ -346,16 +342,14 @@ fn linear_1bit_all_negative_weights() {
 fn linear_1bit_output_dimension_matches_rows() {
     let n_out = 4;
     let blocks: Vec<BlockQ1_0G128> = (0..n_out).map(|_| make_block(0.5, [0xFF; 16])).collect();
-    let layer = Linear1Bit::new(&blocks, n_out, 128);
+    let kernel = ref_kernel();
+    let layer = Linear1Bit::new(&blocks, n_out, 128, kernel.clone()).expect("layer");
     assert_eq!(layer.out_features(), n_out);
     assert_eq!(layer.in_features(), 128);
 
-    let kernel = ref_kernel();
     let input = vec![1.0f32; 128];
     let mut output = vec![0.0f32; n_out];
-    layer
-        .forward_vec(&input, &mut output, &kernel)
-        .expect("forward");
+    layer.forward_vec(&input, &mut output).expect("forward");
 
     for &v in &output {
         assert!((v - 64.0).abs() < 1.0, "expected ~64, got {v}");
@@ -365,8 +359,8 @@ fn linear_1bit_output_dimension_matches_rows() {
 #[test]
 fn linear_1bit_forward_mat_batch() {
     let blocks = vec![make_block(1.0, [0xFF; 16])];
-    let layer = Linear1Bit::new(&blocks, 1, 128);
     let kernel = ref_kernel();
+    let layer = Linear1Bit::new(&blocks, 1, 128, kernel.clone()).expect("layer");
 
     // 2 batch elements
     let mut input = vec![0.0f32; 256];
@@ -379,7 +373,7 @@ fn linear_1bit_forward_mat_batch() {
 
     let mut output = vec![0.0f32; 2];
     layer
-        .forward_mat(&input, &mut output, 2, &kernel)
+        .forward_mat(&input, &mut output, 2)
         .expect("forward_mat");
     assert!((output[0] - 128.0).abs() < 1.0);
     assert!((output[1] - 256.0).abs() < 1.0);
@@ -389,15 +383,13 @@ fn linear_1bit_forward_mat_batch() {
 fn linear_1bit_mixed_weights() {
     // Alternating bits: half positive, half negative
     let blocks = vec![make_block(1.0, [0xAA; 16])];
-    let layer = Linear1Bit::new(&blocks, 1, 128);
     let kernel = ref_kernel();
+    let layer = Linear1Bit::new(&blocks, 1, 128, kernel.clone()).expect("layer");
 
     // Uniform input: the positive and negative weights should cancel
     let input = vec![1.0f32; 128];
     let mut output = vec![0.0f32; 1];
-    layer
-        .forward_vec(&input, &mut output, &kernel)
-        .expect("forward");
+    layer.forward_vec(&input, &mut output).expect("forward");
     // 0xAA: 64 ones, 64 zeros -> dot = scale * (64 - 64) = 0
     assert!(
         output[0].abs() < 0.01,

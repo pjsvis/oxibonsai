@@ -431,3 +431,18 @@ fn q2k_q4k_precision_ordering() {
         "Q4_K MSE ({q4_mse}) should be less than Q2_K MSE ({q2_mse})"
     );
 }
+
+// -----------------------------------------------------------------------
+// Ternary type importability from crate root
+// -----------------------------------------------------------------------
+
+#[test]
+fn ternary_types_importable_from_crate_root() {
+    let _: oxibonsai_core::BlockTQ2_0_g128;
+    let _: oxibonsai_core::BlockTQ2_0;
+    let _: oxibonsai_core::TernaryCode;
+    assert_eq!(oxibonsai_core::QK_TQ2_0_G128, 128);
+    assert_eq!(oxibonsai_core::QK_TQ2_0, 256);
+    assert_eq!(oxibonsai_core::BLOCK_TQ2_0_G128_BYTES, 34);
+    assert_eq!(oxibonsai_core::BLOCK_TQ2_0_BYTES, 66);
+}

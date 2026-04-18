@@ -153,6 +153,7 @@ fn bench_sampling_methods(c: &mut Criterion) {
             top_k: 0,
             top_p: 0.9,
             repetition_penalty: 1.0,
+            ..SamplingParams::default()
         };
         let mut engine = InferenceEngine::new(Qwen3Config::tiny_test(), params, 42);
         b.iter(|| {

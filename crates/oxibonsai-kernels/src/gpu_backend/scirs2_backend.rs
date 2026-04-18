@@ -54,6 +54,12 @@ struct Q1Kernels {
     gemm: GpuKernelHandle,
 }
 
+/// TQ2_0_g128-specific (ternary) compiled kernels.
+#[cfg(feature = "gpu")]
+struct TQ2Kernels {
+    gemv: GpuKernelHandle,
+}
+
 /// Helper kernels for LLM layer operations (SwiGLU, residual add, RMSNorm weighted).
 #[cfg(feature = "gpu")]
 struct HelperKernels {
@@ -113,6 +119,8 @@ pub struct Scirs2Backend {
     kernels: OnceLock<Result<CompiledKernels, String>>,
     /// Lazily compiled Q1_0_g128 kernels.
     q1_kernels: OnceLock<Result<Q1Kernels, String>>,
+    /// Lazily compiled TQ2_0_g128 (ternary) kernels.
+    tq2_kernels: OnceLock<Result<TQ2Kernels, String>>,
     /// Cached GPU-resident weight buffers, keyed by [`GpuWeightHandle`] ID.
     weight_cache: Mutex<HashMap<u64, GpuBuffer<u8>>>,
     /// Pre-allocated reusable input buffer (max_k floats).
@@ -146,6 +154,7 @@ impl Scirs2Backend {
             ctx,
             kernels: OnceLock::new(),
             q1_kernels: OnceLock::new(),
+            tq2_kernels: OnceLock::new(),
             weight_cache: Mutex::new(HashMap::new()),
             io_input_buf: Mutex::new(None),
             io_output_buf: Mutex::new(None),
@@ -185,6 +194,7 @@ impl Scirs2Backend {
             ctx,
             kernels: OnceLock::new(),
             q1_kernels: OnceLock::new(),
+            tq2_kernels: OnceLock::new(),
             weight_cache: Mutex::new(HashMap::new()),
             io_input_buf: Mutex::new(None),
             io_output_buf: Mutex::new(None),
@@ -273,6 +283,42 @@ impl Scirs2Backend {
             gemv: compile("gemv_q1_g128", gemv_src)?,
             gemm: compile("gemm_q1_g128", gemm_src)?,
         })
+    }
+
+    /// Get or compile the TQ2_0_g128 (ternary) kernels.
+    fn get_tq2_kernels(&self) -> Result<&TQ2Kernels, GpuError> {
+        let result = self.tq2_kernels.get_or_init(|| self.compile_tq2_kernels());
+        match result {
+            Ok(k) => Ok(k),
+            Err(msg) => Err(GpuError::KernelLaunch(msg.clone())),
+        }
+    }
+
+    fn compile_tq2_kernels(&self) -> Result<TQ2Kernels, String> {
+        let gemv_src = Self::select_tq2_gemv_source();
+        if gemv_src.is_empty() {
+            return Err("TQ2_0_g128 GPU GEMV is only implemented for Metal (macOS); no CUDA ternary kernel available".into());
+        }
+        let compile = |name: &str, src: &str| -> Result<GpuKernelHandle, String> {
+            self.ctx
+                .execute(|compiler| compiler.compile(src))
+                .map_err(|e| format!("{name}: {e}"))
+        };
+        Ok(TQ2Kernels {
+            gemv: compile("gemv_tq2_g128_v1", gemv_src)?,
+        })
+    }
+
+    /// Returns the TQ2_0_g128 GEMV kernel source for the active backend.
+    #[allow(unreachable_code)]
+    fn select_tq2_gemv_source() -> &'static str {
+        #[cfg(all(feature = "metal", target_os = "macos"))]
+        {
+            use super::kernel_sources::MSL_GEMV_TQ2_G128_V1;
+            return MSL_GEMV_TQ2_G128_V1;
+        }
+        // No CUDA ternary kernel yet — return empty string (compile will fail gracefully).
+        ""
     }
 
     fn get_helper_kernels(&self) -> Result<&HelperKernels, GpuError> {
@@ -991,6 +1037,99 @@ impl Scirs2Backend {
     pub fn cached_weight_count(&self) -> usize {
         self.weight_cache.lock().map(|c| c.len()).unwrap_or(0)
     }
+
+    /// Upload TQ2_0_g128 (ternary) weight blocks to GPU in SoA layout.
+    ///
+    /// Converts AoS block layout `[qs: [u8;32], d: f16]` (34 bytes/block) to
+    /// SoA layout `[N×2B FP16 scales][N×32B qs data]` for coalesced GPU reads.
+    ///
+    /// Returns a [`GpuWeightHandle`] for use with [`gemv_tq2_g128_cached`](Self::gemv_tq2_g128_cached).
+    pub fn upload_weights_ternary(
+        &self,
+        blocks: &[oxibonsai_core::BlockTQ2_0_g128],
+    ) -> Result<crate::weight_cache::GpuWeightHandle, GpuError> {
+        let n = blocks.len();
+        // SoA layout: [n * 2 bytes (FP16 scales LE)] ++ [n * 32 bytes (qs data)]
+        let mut soa = Vec::with_capacity(n * 34);
+        // Phase 1: all FP16 scales (2 bytes each, little-endian)
+        for block in blocks {
+            let bits = block.d.to_bits().to_le_bytes();
+            soa.push(bits[0]);
+            soa.push(bits[1]);
+        }
+        // Phase 2: all qs arrays (32 bytes each)
+        for block in blocks {
+            soa.extend_from_slice(&block.qs);
+        }
+        let buf: scirs2_core::gpu::GpuBuffer<u8> = self.ctx.create_buffer_from_slice(&soa);
+        let id = NEXT_HANDLE_ID.fetch_add(1, Ordering::Relaxed);
+        let mut cache = self
+            .weight_cache
+            .lock()
+            .map_err(|_| GpuError::NotAvailable("weight cache lock poisoned".into()))?;
+        cache.insert(id, buf);
+        debug!(
+            handle = id,
+            blocks = n,
+            bytes = soa.len(),
+            "uploaded ternary weights to GPU (SoA)"
+        );
+        Ok(crate::weight_cache::GpuWeightHandle(id))
+    }
+
+    /// TQ2_0_g128 (ternary) GEMV using a pre-uploaded SoA weight buffer.
+    ///
+    /// Only the input vector is copied host→device.
+    /// The weight buffer (SoA layout) is already GPU-resident.
+    pub fn gemv_tq2_g128_cached(
+        &self,
+        handle: crate::weight_cache::GpuWeightHandle,
+        input: &[f32],
+        n_rows: usize,
+        k: usize,
+    ) -> Result<Vec<f32>, GpuError> {
+        if k == 0 || k % 128 != 0 {
+            return Err(GpuError::InvalidArgument(format!(
+                "k={k} must be a positive multiple of 128"
+            )));
+        }
+        if input.len() != k {
+            return Err(GpuError::InvalidArgument(format!(
+                "input.len()={} != k={}",
+                input.len(),
+                k
+            )));
+        }
+
+        // Clone the cached GPU buffer (Arc clone, keeps GPU memory alive).
+        let blocks_buf = {
+            let cache = self
+                .weight_cache
+                .lock()
+                .map_err(|_| GpuError::NotAvailable("weight cache lock poisoned".into()))?;
+            cache.get(&handle.0).cloned().ok_or_else(|| {
+                GpuError::InvalidArgument(format!("invalid ternary weight handle: {:?}", handle))
+            })?
+        };
+        // Mutex is now released.
+
+        let tq2 = self.get_tq2_kernels()?;
+
+        // Input must be reinterpreted as float4 in the MSL kernel (buffer(1) is float4*).
+        // We pass raw f32 bytes; MSL will read them as float4.
+        let input_buf = self.ctx.create_buffer_from_slice(input);
+        let output_buf: scirs2_core::gpu::GpuBuffer<f32> = self.ctx.create_buffer(n_rows);
+
+        tq2.gemv.set_buffer("x", &blocks_buf);
+        tq2.gemv.set_buffer("y", &input_buf);
+        tq2.gemv.set_buffer("result", &output_buf);
+        tq2.gemv.set_u32("n", n_rows as u32);
+        tq2.gemv.set_u32("k", k as u32);
+
+        tq2.gemv.dispatch([Self::workgroups_simd(n_rows), 1, 1]);
+
+        Self::read_output(&output_buf, n_rows)
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -1292,6 +1431,64 @@ mod tests {
             let buf = b.host_to_device(&src, 0).expect("h2d");
             let out = b.device_to_host(&buf).expect("d2h");
             assert_eq!(out, src);
+        }
+    }
+
+    #[test]
+    #[cfg(all(feature = "metal", target_os = "macos"))]
+    fn tq2_upload_ternary_creates_handle() {
+        use half::f16;
+        use oxibonsai_core::BlockTQ2_0_g128;
+        if let Some(b) = make_backend() {
+            if !b.is_accelerated() {
+                return;
+            }
+            let block = BlockTQ2_0_g128 {
+                qs: [0xAAu8; 32],
+                d: f16::from_f32(1.0),
+            };
+            let handle = b.upload_weights_ternary(&[block]);
+            assert!(
+                handle.is_ok(),
+                "ternary upload should succeed: {:?}",
+                handle
+            );
+            assert_eq!(b.cached_weight_count(), 1);
+        }
+    }
+
+    #[test]
+    #[cfg(all(feature = "metal", target_os = "macos"))]
+    fn tq2_gemv_all_positive_weights() {
+        use half::f16;
+        use oxibonsai_core::BlockTQ2_0_g128;
+        if let Some(b) = make_backend() {
+            if !b.is_accelerated() {
+                return;
+            }
+            // 1 row, k=128: qs=0xAA → all +1, scale=1.0, input all 1.0
+            // Expected: 128 × 1.0 × 1.0 = 128.0
+            let block = BlockTQ2_0_g128 {
+                qs: [0xAAu8; 32],
+                d: f16::from_f32(1.0),
+            };
+            let handle = b
+                .upload_weights_ternary(&[block])
+                .expect("upload should succeed");
+            let input = vec![1.0f32; 128];
+            let result = b.gemv_tq2_g128_cached(handle, &input, 1, 128);
+            assert!(
+                result.is_ok(),
+                "cached ternary GEMV should succeed: {:?}",
+                result
+            );
+            let out = result.expect("result");
+            assert_eq!(out.len(), 1);
+            assert!(
+                (out[0] - 128.0).abs() < 1.0,
+                "expected ~128.0, got {}",
+                out[0]
+            );
         }
     }
 }

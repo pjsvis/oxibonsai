@@ -324,7 +324,9 @@ fn tensor_store_empty_operations() {
 
 #[test]
 fn all_known_tensor_types_have_properties() {
-    let known_ids: &[u32] = &[0, 1, 2, 3, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 30, 41];
+    let known_ids: &[u32] = &[
+        0, 1, 2, 3, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 30, 35, 41, 42,
+    ];
     for &id in known_ids {
         let ty = GgufTensorType::from_id(id).expect("known type should parse");
         assert!(ty.block_size() > 0, "block_size for {ty} must be > 0");
@@ -335,7 +337,9 @@ fn all_known_tensor_types_have_properties() {
 
 #[test]
 fn q1_0_g128_is_only_one_bit() {
-    let known_ids: &[u32] = &[0, 1, 2, 3, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 30, 41];
+    let known_ids: &[u32] = &[
+        0, 1, 2, 3, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 30, 35, 41, 42,
+    ];
     for &id in known_ids {
         let ty = GgufTensorType::from_id(id).expect("known type should parse");
         if id == 41 {

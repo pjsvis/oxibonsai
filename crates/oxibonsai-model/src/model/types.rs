@@ -1,24 +1,8 @@
-//! Bonsai (Qwen3) model — N-layer Transformer decoder.
+//! Auto-generated module
 //!
-//! [`BonsaiModel`] represents the complete model ready for forward-pass
-//! inference. It can be constructed in two ways:
-//!
-//! - **[`BonsaiModel::from_gguf`]** — load real weights from a memory-mapped
-//!   GGUF file (zero-copy for 1-bit blocks).
-//! - **[`BonsaiModel::new`]** — create a weight-free model for unit testing.
-//!
-//! The forward pass (token embedding -> N blocks -> final norm -> LM head)
-//! is driven by [`BonsaiModel::forward`], which takes a single token ID
-//! and position index and returns logits over the full vocabulary.
+//! 🤖 Generated with [SplitRS](https://github.com/cool-japan/splitrs)
 
-mod weight_loaders;
-use weight_loaders::{load_f32_tensor, load_output_weight, load_transformer_block};
-
-use oxibonsai_core::config::Qwen3Config;
-use oxibonsai_core::gguf::reader::GgufFile;
-use oxibonsai_core::gguf::tensor_info::tensor_names;
-use oxibonsai_kernels::traits::OneBitKernel;
-
+use super::weight_loaders::{load_f32_tensor, load_output_weight, load_transformer_block};
 #[cfg(any(
     all(feature = "metal", target_os = "macos"),
     all(
@@ -30,10 +14,14 @@ use crate::block::blocks_as_bytes;
 use crate::block::TransformerBlock;
 use crate::error::{ModelError, ModelResult};
 use crate::kv_cache::KvCache;
-use crate::layers::linear::Linear1Bit;
+use crate::layers::linear::{Linear1Bit, LinearTernary};
 use crate::layers::rms_norm::RmsNorm;
 use crate::layers::rope::RopeTable;
 use crate::model_registry::ModelVariant;
+use oxibonsai_core::config::Qwen3Config;
+use oxibonsai_core::gguf::reader::GgufFile;
+use oxibonsai_core::gguf::tensor_info::tensor_names;
+use oxibonsai_kernels::traits::OneBitKernel;
 
 /// The complete Bonsai-8B model (Qwen3 architecture) with loaded weights.
 ///
@@ -43,7 +31,7 @@ pub struct BonsaiModel<'a> {
     /// Token embedding table: [vocab_size × hidden_size] as FP32.
     token_embd: Vec<f32>,
     /// 36 Transformer blocks.
-    blocks: Vec<TransformerBlock<'a>>,
+    pub(crate) blocks: Vec<TransformerBlock<'a>>,
     /// Final output RMSNorm.
     output_norm: RmsNorm,
     /// Output (LM head) weight blocks.
@@ -52,6 +40,8 @@ pub struct BonsaiModel<'a> {
     rope: RopeTable,
     /// KV cache.
     kv_cache: KvCache,
+    /// Dominant tensor quantization type, detected at load time for variant identification.
+    dominant_quant_type: oxibonsai_core::GgufTensorType,
     /// Cached GPU weight handles for zero-overhead Metal decode path.
     /// Populated on first GPU forward pass, reused on subsequent calls.
     #[cfg(all(feature = "metal", target_os = "macos"))]
@@ -64,17 +54,6 @@ pub struct BonsaiModel<'a> {
     ))]
     cuda_qkv_cache: std::sync::Mutex<Option<std::sync::Arc<Vec<Vec<u8>>>>>,
 }
-
-/// Output projection can be either 1-bit or FP32 depending on the model.
-enum OutputWeight<'a> {
-    OneBit(Linear1Bit<'a>),
-    Fp32 {
-        weights: Vec<f32>,
-        out_features: usize,
-        in_features: usize,
-    },
-}
-
 impl<'a> BonsaiModel<'a> {
     /// Load a model from a parsed GGUF file.
     ///
@@ -82,26 +61,27 @@ impl<'a> BonsaiModel<'a> {
     /// into the layer structures (zero-copy for 1-bit weights).
     pub fn from_gguf(gguf: &'a GgufFile<'a>, max_seq_len: usize) -> ModelResult<Self> {
         let mut config = Qwen3Config::from_metadata(&gguf.metadata)?;
-
-        // Derive actual vocab_size from the token embedding tensor shape,
-        // since the GGUF metadata may report the tokenizer's full vocabulary
-        // while the model tensors use a trimmed vocabulary.
         if let Some(embd_info) = gguf.tensors.get(tensor_names::TOKEN_EMBD) {
             if embd_info.shape.len() >= 2 {
                 let tensor_vocab = embd_info.shape[1] as usize;
                 if tensor_vocab != config.vocab_size {
                     tracing::warn!(
-                        metadata_vocab = config.vocab_size,
-                        tensor_vocab,
+                        metadata_vocab = config.vocab_size, tensor_vocab,
                         "vocab_size mismatch: GGUF metadata says {} but token_embd tensor has {} rows; using tensor dimension",
-                        config.vocab_size,
-                        tensor_vocab,
+                        config.vocab_size, tensor_vocab,
                     );
                     config.vocab_size = tensor_vocab;
                 }
             }
         }
-
+        let dominant_quant_type = {
+            let counts = gguf.tensors.count_by_type();
+            counts
+                .into_iter()
+                .max_by_key(|(_, count)| *count)
+                .map(|(ty, _)| ty)
+                .unwrap_or(oxibonsai_core::GgufTensorType::Q1_0_g128)
+        };
         tracing::info!(
             layers = config.num_layers,
             hidden = config.hidden_size,
@@ -110,42 +90,29 @@ impl<'a> BonsaiModel<'a> {
             vocab = config.vocab_size,
             "loading BonsaiModel from GGUF"
         );
-
-        // Load token embeddings (always FP32)
         let token_embd = load_f32_tensor(gguf, tensor_names::TOKEN_EMBD)?;
-
-        // Load final RMSNorm weights (always FP32)
         let output_norm_w = load_f32_tensor(gguf, tensor_names::OUTPUT_NORM)?;
         let output_norm = RmsNorm::new(output_norm_w, config.rms_norm_eps);
-
-        // Load output (LM head) — may be Q1_0_g128 or F32
-        let output_weight = load_output_weight(gguf, &config)?;
-
-        // Build Transformer blocks
+        let kernel = std::sync::Arc::new(oxibonsai_kernels::KernelDispatcher::auto_detect());
+        let output_weight = load_output_weight(gguf, &config, &kernel)?;
         let mut blocks = Vec::with_capacity(config.num_layers);
         for layer_idx in 0..config.num_layers {
-            let block = load_transformer_block(gguf, &config, layer_idx)?;
+            let block = load_transformer_block(gguf, &config, layer_idx, &kernel)?;
             blocks.push(block);
         }
-
-        // Precompute RoPE tables
         let rope = RopeTable::new(config.head_dim, max_seq_len, config.rope_freq_base);
-
-        // Allocate KV cache
         let kv_cache = KvCache::new(
             config.num_layers,
             config.num_kv_heads,
             config.head_dim,
             max_seq_len,
         );
-
         tracing::info!(
             blocks = blocks.len(),
             embd_size = token_embd.len(),
             max_seq_len,
             "model loaded successfully"
         );
-
         Ok(Self {
             config,
             token_embd,
@@ -154,6 +121,7 @@ impl<'a> BonsaiModel<'a> {
             output_weight,
             rope,
             kv_cache,
+            dominant_quant_type,
             #[cfg(all(feature = "metal", target_os = "macos"))]
             gpu_weight_cache: std::sync::Mutex::new(None),
             #[cfg(all(
@@ -163,7 +131,6 @@ impl<'a> BonsaiModel<'a> {
             cuda_qkv_cache: std::sync::Mutex::new(None),
         })
     }
-
     /// Create a model from configuration only (no weights), for testing.
     pub fn new(config: Qwen3Config) -> Self {
         let h = config.hidden_size;
@@ -174,7 +141,6 @@ impl<'a> BonsaiModel<'a> {
             4096,
         );
         let rope = RopeTable::new(config.head_dim, 4096, config.rope_freq_base);
-
         Self {
             token_embd: vec![0.0; config.vocab_size * h],
             blocks: Vec::new(),
@@ -186,6 +152,7 @@ impl<'a> BonsaiModel<'a> {
             },
             rope,
             kv_cache,
+            dominant_quant_type: oxibonsai_core::GgufTensorType::Q1_0_g128,
             #[cfg(all(feature = "metal", target_os = "macos"))]
             gpu_weight_cache: std::sync::Mutex::new(None),
             #[cfg(all(
@@ -196,27 +163,22 @@ impl<'a> BonsaiModel<'a> {
             config,
         }
     }
-
     /// Get model configuration.
     pub fn config(&self) -> &Qwen3Config {
         &self.config
     }
-
     /// Get mutable reference to KV cache.
     pub fn kv_cache_mut(&mut self) -> &mut KvCache {
         &mut self.kv_cache
     }
-
     /// Reset the KV cache for a new conversation.
     pub fn reset(&mut self) {
         self.kv_cache.clear();
     }
-
     /// Reset the KV cache (alias for `reset`).
     pub fn reset_cache(&mut self) {
         self.kv_cache.clear();
     }
-
     /// Upload all weight matrices across every Transformer block to GPU memory.
     ///
     /// Should be called once after model loading and before the first
@@ -231,48 +193,41 @@ impl<'a> BonsaiModel<'a> {
         for block in &mut self.blocks {
             block.upload_to_gpu(kernel);
         }
-        // Also upload the LM head weights if they are 1-bit.
-        if let OutputWeight::OneBit(ref mut linear) = self.output_weight {
-            linear.upload_to_gpu(kernel);
+        match self.output_weight {
+            OutputWeight::OneBit(ref mut linear) => linear.upload_to_gpu(),
+            OutputWeight::Ternary(ref mut linear) => linear.upload_to_gpu(),
+            OutputWeight::Fp32 { .. } => {}
         }
         tracing::info!("GPU weight upload complete");
     }
-
-    /// Detect the model variant from the loaded configuration.
+    /// Detect the model variant from the loaded configuration and dominant tensor type.
     pub fn variant(&self) -> ModelVariant {
-        ModelVariant::from_config(&self.config)
+        ModelVariant::from_config_and_sample_tensor_type(&self.config, self.dominant_quant_type)
     }
-
     /// Approximate total number of parameters in the model.
     pub fn num_parameters(&self) -> u64 {
         self.variant().param_count()
     }
-
     /// Approximate model size in bytes (on disk).
     pub fn model_size_bytes(&self) -> u64 {
         self.variant().expected_model_size_bytes()
     }
-
     /// Maximum context length from the configuration.
     pub fn context_length(&self) -> usize {
         self.config.max_context_length
     }
-
     /// Number of transformer layers.
     pub fn num_layers(&self) -> usize {
         self.config.num_layers
     }
-
     /// Hidden dimension size.
     pub fn hidden_size(&self) -> usize {
         self.config.hidden_size
     }
-
     /// Current KV cache memory usage in bytes.
     pub fn kv_cache_memory_bytes(&self) -> usize {
         self.kv_cache.memory_bytes()
     }
-
     /// Load a model from GGUF with auto-detected variant.
     ///
     /// Same as `from_gguf` but also logs the detected model variant.
@@ -286,7 +241,6 @@ impl<'a> BonsaiModel<'a> {
         );
         Ok(model)
     }
-
     /// Attempt to run all transformer layers in a single Metal command buffer.
     ///
     /// On success, `hidden` is updated in-place through all layers. The GPU
@@ -299,12 +253,10 @@ impl<'a> BonsaiModel<'a> {
         pos: usize,
     ) -> Result<(), Box<dyn std::error::Error>> {
         use oxibonsai_kernels::FullForwardLayerParams;
-
         let n_layers = self.blocks.len();
         if n_layers == 0 {
             return Err("no blocks".into());
         }
-
         let eps = self.blocks[0].attn_norm_eps();
         let h = self.config.hidden_size;
         let inter = self.config.intermediate_size;
@@ -312,8 +264,6 @@ impl<'a> BonsaiModel<'a> {
         let nkv = self.config.num_kv_heads;
         let hd = self.config.head_dim;
         let max_seq_len = self.kv_cache.max_seq_len();
-
-        // Check all blocks have required GPU handles before building params.
         for block in &self.blocks {
             if block.fused_qkv_gpu_handle().is_none()
                 || block.attn_output_gpu_handle().is_none()
@@ -323,25 +273,23 @@ impl<'a> BonsaiModel<'a> {
                 return Err("missing GPU handle".into());
             }
         }
-
-        // Build QKV concat bytes per layer. These allocate only on cache miss
-        // (first token); after that, get_or_upload_weight returns the cached handle.
         let mut qkv_concats: Vec<Vec<u8>> = Vec::with_capacity(n_layers);
         for block in &self.blocks {
-            let q_bytes = blocks_as_bytes(block.attn_q_blocks());
-            let k_bytes = blocks_as_bytes(block.attn_k_blocks());
-            let v_bytes = blocks_as_bytes(block.attn_v_blocks());
+            let q_bytes =
+                blocks_as_bytes(block.attn_q_blocks().ok_or("attn_q: not a 1-bit layer")?);
+            let k_bytes =
+                blocks_as_bytes(block.attn_k_blocks().ok_or("attn_k: not a 1-bit layer")?);
+            let v_bytes =
+                blocks_as_bytes(block.attn_v_blocks().ok_or("attn_v: not a 1-bit layer")?);
             let mut concat = Vec::with_capacity(q_bytes.len() + k_bytes.len() + v_bytes.len());
             concat.extend_from_slice(q_bytes);
             concat.extend_from_slice(k_bytes);
             concat.extend_from_slice(v_bytes);
             qkv_concats.push(concat);
         }
-
         let mut layer_params: Vec<FullForwardLayerParams<'_>> = Vec::with_capacity(n_layers);
         for (i, block) in self.blocks.iter().enumerate() {
             let norm_handle_base = 1_000_000u64 + (block.layer_index() as u64) * 10;
-
             layer_params.push(FullForwardLayerParams {
                 attn_norm_handle: norm_handle_base,
                 attn_norm_bytes: block.attn_norm_weight(),
@@ -352,23 +300,35 @@ impl<'a> BonsaiModel<'a> {
                 k_norm_handle: norm_handle_base + 2,
                 k_norm_bytes: block.k_norm_weight(),
                 attn_proj_handle: block.attn_output_gpu_handle().map(|h| h.id()).unwrap_or(0),
-                attn_proj_bytes: blocks_as_bytes(block.attn_output_blocks()),
+                attn_proj_bytes: blocks_as_bytes(
+                    block
+                        .attn_output_blocks()
+                        .ok_or("attn_output: not a 1-bit layer")?,
+                ),
                 ffn_norm_handle: norm_handle_base + 3,
                 ffn_norm_bytes: block.ffn_norm_weight(),
                 gate_up_handle: block
                     .fused_gate_up_gpu_handle()
                     .map(|h| h.id())
                     .unwrap_or(0),
-                gate_bytes: blocks_as_bytes(block.ffn_gate_blocks()),
-                up_bytes: blocks_as_bytes(block.ffn_up_blocks()),
+                gate_bytes: blocks_as_bytes(
+                    block
+                        .ffn_gate_blocks()
+                        .ok_or("ffn_gate: not a 1-bit layer")?,
+                ),
+                up_bytes: blocks_as_bytes(
+                    block.ffn_up_blocks().ok_or("ffn_up: not a 1-bit layer")?,
+                ),
                 down_handle: block.ffn_down_gpu_handle().map(|h| h.id()).unwrap_or(0),
-                down_bytes: blocks_as_bytes(block.ffn_down_blocks()),
+                down_bytes: blocks_as_bytes(
+                    block
+                        .ffn_down_blocks()
+                        .ok_or("ffn_down: not a 1-bit layer")?,
+                ),
             });
         }
-
         let rope_cos = self.rope.cos_at(pos);
         let rope_sin = self.rope.sin_at(pos);
-
         oxibonsai_kernels::try_metal_full_forward(
             hidden,
             pos,
@@ -383,7 +343,6 @@ impl<'a> BonsaiModel<'a> {
             hd,
             eps,
             max_seq_len,
-            // No LM head fusion — layers only
             None,
             None,
             eps,
@@ -394,11 +353,145 @@ impl<'a> BonsaiModel<'a> {
             None,
         )
         .map_err(|e| {
-            tracing::warn!(error = %e, "full-forward GPU dispatch failed, falling back");
+            tracing::warn!(
+                error = % e, "full-forward GPU dispatch failed, falling back"
+            );
             Box::new(e) as Box<dyn std::error::Error>
         })
     }
-
+    /// Attempt to run every transformer layer on Metal for a ternary
+    /// (TQ2_0_g128) model, encoding all layers into a single command buffer.
+    ///
+    /// Mirrors [`try_metal_full_forward_inner`] but uses the TQ2 GEMV kernel
+    /// and ternary block slices. Returns `Err` if any block is not ternary or
+    /// the Metal dispatch fails — in which case the caller should fall back
+    /// to the CPU per-layer path.
+    #[cfg(all(feature = "metal", target_os = "macos"))]
+    fn try_metal_full_forward_ternary_inner(
+        &self,
+        hidden: &mut [f32],
+        pos: usize,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        use crate::block::blocks_as_bytes_ternary;
+        use oxibonsai_kernels::FullForwardLayerParamsTernary;
+        let n_layers = self.blocks.len();
+        if n_layers == 0 {
+            return Err("no blocks".into());
+        }
+        let eps = self.blocks[0].attn_norm_eps();
+        let h = self.config.hidden_size;
+        let inter = self.config.intermediate_size;
+        let nq = self.config.num_attention_heads;
+        let nkv = self.config.num_kv_heads;
+        let hd = self.config.head_dim;
+        let max_seq_len = self.kv_cache.max_seq_len();
+        for block in &self.blocks {
+            if block.attn_q_blocks_ternary().is_none()
+                || block.attn_k_blocks_ternary().is_none()
+                || block.attn_v_blocks_ternary().is_none()
+                || block.attn_output_blocks_ternary().is_none()
+                || block.ffn_gate_blocks_ternary().is_none()
+                || block.ffn_up_blocks_ternary().is_none()
+                || block.ffn_down_blocks_ternary().is_none()
+            {
+                return Err("non-ternary block on ternary full-forward path".into());
+            }
+        }
+        let mut qkv_concats: Vec<Vec<u8>> = Vec::with_capacity(n_layers);
+        for block in &self.blocks {
+            let q_bytes = blocks_as_bytes_ternary(
+                block
+                    .attn_q_blocks_ternary()
+                    .ok_or("attn_q: not a ternary layer")?,
+            );
+            let k_bytes = blocks_as_bytes_ternary(
+                block
+                    .attn_k_blocks_ternary()
+                    .ok_or("attn_k: not a ternary layer")?,
+            );
+            let v_bytes = blocks_as_bytes_ternary(
+                block
+                    .attn_v_blocks_ternary()
+                    .ok_or("attn_v: not a ternary layer")?,
+            );
+            let mut concat = Vec::with_capacity(q_bytes.len() + k_bytes.len() + v_bytes.len());
+            concat.extend_from_slice(q_bytes);
+            concat.extend_from_slice(k_bytes);
+            concat.extend_from_slice(v_bytes);
+            qkv_concats.push(concat);
+        }
+        let mut layer_params: Vec<FullForwardLayerParamsTernary<'_>> = Vec::with_capacity(n_layers);
+        for (i, block) in self.blocks.iter().enumerate() {
+            let norm_handle_base = 2_000_000u64 + (block.layer_index() as u64) * 10;
+            let weight_handle_base = 3_000_000u64 + (block.layer_index() as u64) * 10;
+            layer_params.push(FullForwardLayerParamsTernary {
+                attn_norm_handle: norm_handle_base,
+                attn_norm_bytes: block.attn_norm_weight(),
+                fused_qkv_handle: weight_handle_base,
+                fused_qkv_bytes: &qkv_concats[i],
+                q_norm_handle: norm_handle_base + 1,
+                q_norm_bytes: block.q_norm_weight(),
+                k_norm_handle: norm_handle_base + 2,
+                k_norm_bytes: block.k_norm_weight(),
+                attn_proj_handle: weight_handle_base + 1,
+                attn_proj_bytes: blocks_as_bytes_ternary(
+                    block
+                        .attn_output_blocks_ternary()
+                        .ok_or("attn_output: not a ternary layer")?,
+                ),
+                ffn_norm_handle: norm_handle_base + 3,
+                ffn_norm_bytes: block.ffn_norm_weight(),
+                gate_up_handle: weight_handle_base + 2,
+                gate_bytes: blocks_as_bytes_ternary(
+                    block
+                        .ffn_gate_blocks_ternary()
+                        .ok_or("ffn_gate: not a ternary layer")?,
+                ),
+                up_bytes: blocks_as_bytes_ternary(
+                    block
+                        .ffn_up_blocks_ternary()
+                        .ok_or("ffn_up: not a ternary layer")?,
+                ),
+                down_handle: weight_handle_base + 3,
+                down_bytes: blocks_as_bytes_ternary(
+                    block
+                        .ffn_down_blocks_ternary()
+                        .ok_or("ffn_down: not a ternary layer")?,
+                ),
+            });
+        }
+        let rope_cos = self.rope.cos_at(pos);
+        let rope_sin = self.rope.sin_at(pos);
+        oxibonsai_kernels::try_metal_full_forward_ternary(
+            hidden,
+            pos,
+            n_layers,
+            &layer_params,
+            rope_cos,
+            rope_sin,
+            h,
+            inter,
+            nq,
+            nkv,
+            hd,
+            eps,
+            max_seq_len,
+            None,
+            None,
+            eps,
+            None,
+            None,
+            0,
+            None,
+            None,
+        )
+        .map_err(|e| {
+            tracing::warn!(
+                error = % e, "ternary full-forward GPU dispatch failed, falling back"
+            );
+            Box::new(e) as Box<dyn std::error::Error>
+        })
+    }
     /// Attempt to run all transformer layers + final RMSNorm + LM head GEMV
     /// in a single Metal command buffer.
     ///
@@ -413,20 +506,19 @@ impl<'a> BonsaiModel<'a> {
         logits: &mut Vec<f32>,
     ) -> Result<(), Box<dyn std::error::Error>> {
         use oxibonsai_kernels::FullForwardLayerParams;
-
         let n_layers = self.blocks.len();
         if n_layers == 0 {
             return Err("no blocks".into());
         }
-
-        // Only support 1-bit LM head on GPU
         let lm_head_linear = match &self.output_weight {
             OutputWeight::OneBit(linear) => linear,
+            OutputWeight::Ternary(_) => {
+                return Err("ternary LM head not supported on fused GPU path".into());
+            }
             OutputWeight::Fp32 { .. } => {
                 return Err("FP32 LM head not supported on fused GPU path".into());
             }
         };
-
         let eps = self.blocks[0].attn_norm_eps();
         let h = self.config.hidden_size;
         let inter = self.config.intermediate_size;
@@ -434,8 +526,6 @@ impl<'a> BonsaiModel<'a> {
         let nkv = self.config.num_kv_heads;
         let hd = self.config.head_dim;
         let max_seq_len = self.kv_cache.max_seq_len();
-
-        // Check all blocks have required GPU handles
         for block in &self.blocks {
             if block.fused_qkv_gpu_handle().is_none()
                 || block.attn_output_gpu_handle().is_none()
@@ -445,24 +535,23 @@ impl<'a> BonsaiModel<'a> {
                 return Err("missing GPU handle".into());
             }
         }
-
-        // Build QKV concat bytes per layer
         let mut qkv_concats: Vec<Vec<u8>> = Vec::with_capacity(n_layers);
         for block in &self.blocks {
-            let q_bytes = blocks_as_bytes(block.attn_q_blocks());
-            let k_bytes = blocks_as_bytes(block.attn_k_blocks());
-            let v_bytes = blocks_as_bytes(block.attn_v_blocks());
+            let q_bytes =
+                blocks_as_bytes(block.attn_q_blocks().ok_or("attn_q: not a 1-bit layer")?);
+            let k_bytes =
+                blocks_as_bytes(block.attn_k_blocks().ok_or("attn_k: not a 1-bit layer")?);
+            let v_bytes =
+                blocks_as_bytes(block.attn_v_blocks().ok_or("attn_v: not a 1-bit layer")?);
             let mut concat = Vec::with_capacity(q_bytes.len() + k_bytes.len() + v_bytes.len());
             concat.extend_from_slice(q_bytes);
             concat.extend_from_slice(k_bytes);
             concat.extend_from_slice(v_bytes);
             qkv_concats.push(concat);
         }
-
         let mut layer_params: Vec<FullForwardLayerParams<'_>> = Vec::with_capacity(n_layers);
         for (i, block) in self.blocks.iter().enumerate() {
             let norm_handle_base = 1_000_000u64 + (block.layer_index() as u64) * 10;
-
             layer_params.push(FullForwardLayerParams {
                 attn_norm_handle: norm_handle_base,
                 attn_norm_bytes: block.attn_norm_weight(),
@@ -473,33 +562,41 @@ impl<'a> BonsaiModel<'a> {
                 k_norm_handle: norm_handle_base + 2,
                 k_norm_bytes: block.k_norm_weight(),
                 attn_proj_handle: block.attn_output_gpu_handle().map(|h| h.id()).unwrap_or(0),
-                attn_proj_bytes: blocks_as_bytes(block.attn_output_blocks()),
+                attn_proj_bytes: blocks_as_bytes(
+                    block
+                        .attn_output_blocks()
+                        .ok_or("attn_output: not a 1-bit layer")?,
+                ),
                 ffn_norm_handle: norm_handle_base + 3,
                 ffn_norm_bytes: block.ffn_norm_weight(),
                 gate_up_handle: block
                     .fused_gate_up_gpu_handle()
                     .map(|h| h.id())
                     .unwrap_or(0),
-                gate_bytes: blocks_as_bytes(block.ffn_gate_blocks()),
-                up_bytes: blocks_as_bytes(block.ffn_up_blocks()),
+                gate_bytes: blocks_as_bytes(
+                    block
+                        .ffn_gate_blocks()
+                        .ok_or("ffn_gate: not a 1-bit layer")?,
+                ),
+                up_bytes: blocks_as_bytes(
+                    block.ffn_up_blocks().ok_or("ffn_up: not a 1-bit layer")?,
+                ),
                 down_handle: block.ffn_down_gpu_handle().map(|h| h.id()).unwrap_or(0),
-                down_bytes: blocks_as_bytes(block.ffn_down_blocks()),
+                down_bytes: blocks_as_bytes(
+                    block
+                        .ffn_down_blocks()
+                        .ok_or("ffn_down: not a 1-bit layer")?,
+                ),
             });
         }
-
         let rope_cos = self.rope.cos_at(pos);
         let rope_sin = self.rope.sin_at(pos);
-
-        // Final norm weight and eps
         let final_norm_handle = 2_000_000u64;
         let final_norm_bytes = self.output_norm.weight();
         let final_norm_eps = self.output_norm.eps();
-
-        // LM head weight (Q1_0_g128 raw bytes)
         let lm_head_handle = 3_000_000u64;
         let lm_head_bytes = blocks_as_bytes(lm_head_linear.blocks());
         let lm_head_out_features = lm_head_linear.out_features();
-
         oxibonsai_kernels::try_metal_full_forward(
             hidden,
             pos,
@@ -521,14 +618,15 @@ impl<'a> BonsaiModel<'a> {
             Some(lm_head_bytes),
             lm_head_out_features,
             Some(logits),
-            None, // not greedy — download full logits
+            None,
         )
         .map_err(|e| {
-            tracing::warn!(error = %e, "full-forward+lm_head GPU dispatch failed, falling back");
+            tracing::warn!(
+                error = % e, "full-forward+lm_head GPU dispatch failed, falling back"
+            );
             Box::new(e) as Box<dyn std::error::Error>
         })
     }
-
     /// Process multiple prompt tokens in a single batch forward pass on GPU.
     ///
     /// Uses GEMM instead of GEMV for projections (processing all tokens at once),
@@ -549,16 +647,9 @@ impl<'a> BonsaiModel<'a> {
                 name: "forward_prefill: empty token_ids".into(),
             });
         }
-
-        // Single token: delegate to normal forward
         if token_ids.len() == 1 {
             return self.forward(token_ids[0], pos_start, kernel);
         }
-
-        // CUDA: for short prompts, the pre-captured CUDA driver graph (decode path) is
-        // faster than batch prefill.  The graph replays in ~43ms/token regardless of
-        // position, while the batch prefill pays sequential attention overhead (~60ms/token
-        // equivalent for 5 tokens).  At N ≤ 16 tokens the graph path wins decisively.
         #[cfg(all(
             feature = "native-cuda",
             not(all(feature = "metal", target_os = "macos")),
@@ -571,22 +662,18 @@ impl<'a> BonsaiModel<'a> {
             }
             return Ok(last_logits);
         }
-
-        // macOS: try Metal batch prefill first
         #[cfg(all(feature = "metal", target_os = "macos"))]
         {
             match self.try_metal_prefill_with_lm_head(token_ids, pos_start) {
                 Ok(logits) => return Ok(logits),
                 Err(e) => {
                     tracing::warn!(
-                        error = %e,
+                        error = % e,
                         "metal batch prefill failed, falling back to sequential"
                     );
                 }
             }
         }
-
-        // Linux / Windows: try CUDA batch prefill
         #[cfg(all(
             feature = "native-cuda",
             not(all(feature = "metal", target_os = "macos")),
@@ -596,22 +683,27 @@ impl<'a> BonsaiModel<'a> {
             match self.try_cuda_prefill_with_lm_head(token_ids, pos_start) {
                 Ok(logits) => return Ok(logits),
                 Err(e) => {
-                    tracing::warn!(
-                        error = %e,
-                        "cuda batch prefill failed, falling back to sequential"
-                    );
+                    let msg = e.to_string();
+                    if msg.contains("LM head not supported on CUDA prefill path") {
+                        tracing::debug!(
+                            error = % e,
+                            "cuda batch prefill skipped (LM head dtype not supported), using sequential"
+                        );
+                    } else {
+                        tracing::warn!(
+                            error = % e,
+                            "cuda batch prefill failed, falling back to sequential"
+                        );
+                    }
                 }
             }
         }
-
-        // Fallback: sequential forward for each token
         let mut last_logits = Vec::new();
         for (i, &token_id) in token_ids.iter().enumerate() {
             last_logits = self.forward(token_id, pos_start + i, kernel)?;
         }
         Ok(last_logits)
     }
-
     /// Forward pass for speculative decode verification.
     ///
     /// Processes multiple tokens in batch via GPU prefill, then runs the LM head
@@ -629,22 +721,18 @@ impl<'a> BonsaiModel<'a> {
         if token_ids.is_empty() {
             return Ok(vec![]);
         }
-
-        // macOS: try Metal batch prefill verify first
         #[cfg(all(feature = "metal", target_os = "macos"))]
         {
             match self.try_metal_prefill_verify(token_ids, pos_start) {
                 Ok(ids) => return Ok(ids),
                 Err(e) => {
                     tracing::warn!(
-                        error = %e,
+                        error = % e,
                         "metal batch prefill verify failed, falling back to sequential"
                     );
                 }
             }
         }
-
-        // Linux / Windows: try CUDA batch prefill verify
         #[cfg(all(
             feature = "native-cuda",
             not(all(feature = "metal", target_os = "macos")),
@@ -655,14 +743,12 @@ impl<'a> BonsaiModel<'a> {
                 Ok(ids) => return Ok(ids),
                 Err(e) => {
                     tracing::warn!(
-                        error = %e,
+                        error = % e,
                         "cuda batch prefill verify failed, falling back to sequential"
                     );
                 }
             }
         }
-
-        // Fallback: sequential forward for each token, argmax each
         let mut token_ids_out = Vec::with_capacity(token_ids.len());
         for (i, &token_id) in token_ids.iter().enumerate() {
             let logits = self.forward(token_id, pos_start + i, kernel)?;
@@ -678,7 +764,6 @@ impl<'a> BonsaiModel<'a> {
         }
         Ok(token_ids_out)
     }
-
     /// GPU batch prefill implementation: all layers + final norm + LM head.
     #[cfg(all(feature = "metal", target_os = "macos"))]
     fn try_metal_prefill_with_lm_head(
@@ -687,20 +772,20 @@ impl<'a> BonsaiModel<'a> {
         pos_start: usize,
     ) -> Result<Vec<f32>, Box<dyn std::error::Error>> {
         use oxibonsai_kernels::FullForwardLayerParams;
-
         let batch_size = token_ids.len();
         let n_layers = self.blocks.len();
         if n_layers == 0 {
             return Err("no blocks".into());
         }
-
         let lm_head_linear = match &self.output_weight {
             OutputWeight::OneBit(linear) => linear,
+            OutputWeight::Ternary(_) => {
+                return Err("ternary LM head not supported on GPU prefill path".into());
+            }
             OutputWeight::Fp32 { .. } => {
                 return Err("FP32 LM head not supported on GPU prefill path".into());
             }
         };
-
         let eps = self.blocks[0].attn_norm_eps();
         let h = self.config.hidden_size;
         let inter = self.config.intermediate_size;
@@ -709,8 +794,6 @@ impl<'a> BonsaiModel<'a> {
         let hd = self.config.head_dim;
         let half_dim = hd / 2;
         let max_seq_len = self.kv_cache.max_seq_len();
-
-        // Check all blocks have required GPU handles
         for block in &self.blocks {
             if block.fused_qkv_gpu_handle().is_none()
                 || block.attn_output_gpu_handle().is_none()
@@ -720,8 +803,6 @@ impl<'a> BonsaiModel<'a> {
                 return Err("missing GPU handle".into());
             }
         }
-
-        // Batch embedding lookup: build hidden_batch [batch × hidden]
         let mut hidden_batch = vec![0.0f32; batch_size * h];
         for (t, &token_id) in token_ids.iter().enumerate() {
             let embd_start = token_id as usize * h;
@@ -737,8 +818,6 @@ impl<'a> BonsaiModel<'a> {
             hidden_batch[t * h..(t + 1) * h]
                 .copy_from_slice(&self.token_embd[embd_start..embd_end]);
         }
-
-        // Build RoPE tables: cos_table[batch × half_dim], sin_table[batch × half_dim]
         let mut cos_table = vec![0.0f32; batch_size * half_dim];
         let mut sin_table = vec![0.0f32; batch_size * half_dim];
         for t in 0..batch_size {
@@ -748,24 +827,23 @@ impl<'a> BonsaiModel<'a> {
             cos_table[t * half_dim..(t + 1) * half_dim].copy_from_slice(cos_vals);
             sin_table[t * half_dim..(t + 1) * half_dim].copy_from_slice(sin_vals);
         }
-
-        // Build QKV concat bytes per layer
         let mut qkv_concats: Vec<Vec<u8>> = Vec::with_capacity(n_layers);
         for block in &self.blocks {
-            let q_bytes = blocks_as_bytes(block.attn_q_blocks());
-            let k_bytes = blocks_as_bytes(block.attn_k_blocks());
-            let v_bytes = blocks_as_bytes(block.attn_v_blocks());
+            let q_bytes =
+                blocks_as_bytes(block.attn_q_blocks().ok_or("attn_q: not a 1-bit layer")?);
+            let k_bytes =
+                blocks_as_bytes(block.attn_k_blocks().ok_or("attn_k: not a 1-bit layer")?);
+            let v_bytes =
+                blocks_as_bytes(block.attn_v_blocks().ok_or("attn_v: not a 1-bit layer")?);
             let mut concat = Vec::with_capacity(q_bytes.len() + k_bytes.len() + v_bytes.len());
             concat.extend_from_slice(q_bytes);
             concat.extend_from_slice(k_bytes);
             concat.extend_from_slice(v_bytes);
             qkv_concats.push(concat);
         }
-
         let mut layer_params: Vec<FullForwardLayerParams<'_>> = Vec::with_capacity(n_layers);
         for (i, block) in self.blocks.iter().enumerate() {
             let norm_handle_base = 1_000_000u64 + (block.layer_index() as u64) * 10;
-
             layer_params.push(FullForwardLayerParams {
                 attn_norm_handle: norm_handle_base,
                 attn_norm_bytes: block.attn_norm_weight(),
@@ -782,32 +860,40 @@ impl<'a> BonsaiModel<'a> {
                     .attn_output_gpu_handle()
                     .map(|hnd| hnd.id())
                     .unwrap_or(0),
-                attn_proj_bytes: blocks_as_bytes(block.attn_output_blocks()),
+                attn_proj_bytes: blocks_as_bytes(
+                    block
+                        .attn_output_blocks()
+                        .ok_or("attn_output: not a 1-bit layer")?,
+                ),
                 ffn_norm_handle: norm_handle_base + 3,
                 ffn_norm_bytes: block.ffn_norm_weight(),
                 gate_up_handle: block
                     .fused_gate_up_gpu_handle()
                     .map(|hnd| hnd.id())
                     .unwrap_or(0),
-                gate_bytes: blocks_as_bytes(block.ffn_gate_blocks()),
-                up_bytes: blocks_as_bytes(block.ffn_up_blocks()),
+                gate_bytes: blocks_as_bytes(
+                    block
+                        .ffn_gate_blocks()
+                        .ok_or("ffn_gate: not a 1-bit layer")?,
+                ),
+                up_bytes: blocks_as_bytes(
+                    block.ffn_up_blocks().ok_or("ffn_up: not a 1-bit layer")?,
+                ),
                 down_handle: block.ffn_down_gpu_handle().map(|hnd| hnd.id()).unwrap_or(0),
-                down_bytes: blocks_as_bytes(block.ffn_down_blocks()),
+                down_bytes: blocks_as_bytes(
+                    block
+                        .ffn_down_blocks()
+                        .ok_or("ffn_down: not a 1-bit layer")?,
+                ),
             });
         }
-
-        // Final norm weight and eps
         let final_norm_handle = 2_000_000u64;
         let final_norm_bytes = self.output_norm.weight();
         let final_norm_eps = self.output_norm.eps();
-
-        // LM head weight
         let lm_head_handle = 3_000_000u64;
         let lm_head_bytes = blocks_as_bytes(lm_head_linear.blocks());
         let lm_head_out_features = lm_head_linear.out_features();
-
         let mut logits = vec![0.0f32; lm_head_out_features];
-
         oxibonsai_kernels::try_metal_full_forward_prefill(
             &hidden_batch,
             batch_size,
@@ -833,13 +919,11 @@ impl<'a> BonsaiModel<'a> {
             None,
         )
         .map_err(|e| {
-            tracing::warn!(error = %e, "batch prefill GPU dispatch failed");
+            tracing::warn!(error = % e, "batch prefill GPU dispatch failed");
             Box::new(e) as Box<dyn std::error::Error>
         })?;
-
         Ok(logits)
     }
-
     /// GPU batch prefill verify: all layers + final norm + LM head + per-position argmax.
     #[cfg(all(feature = "metal", target_os = "macos"))]
     fn try_metal_prefill_verify(
@@ -848,20 +932,20 @@ impl<'a> BonsaiModel<'a> {
         pos_start: usize,
     ) -> Result<Vec<u32>, Box<dyn std::error::Error>> {
         use oxibonsai_kernels::FullForwardLayerParams;
-
         let batch_size = token_ids.len();
         let n_layers = self.blocks.len();
         if n_layers == 0 {
             return Err("no blocks".into());
         }
-
         let lm_head_linear = match &self.output_weight {
             OutputWeight::OneBit(linear) => linear,
+            OutputWeight::Ternary(_) => {
+                return Err("ternary LM head not supported on GPU prefill verify path".into());
+            }
             OutputWeight::Fp32 { .. } => {
                 return Err("FP32 LM head not supported on GPU prefill verify path".into());
             }
         };
-
         let eps = self.blocks[0].attn_norm_eps();
         let h = self.config.hidden_size;
         let inter = self.config.intermediate_size;
@@ -870,8 +954,6 @@ impl<'a> BonsaiModel<'a> {
         let hd = self.config.head_dim;
         let half_dim = hd / 2;
         let max_seq_len = self.kv_cache.max_seq_len();
-
-        // Check all blocks have required GPU handles
         for block in &self.blocks {
             if block.fused_qkv_gpu_handle().is_none()
                 || block.attn_output_gpu_handle().is_none()
@@ -881,8 +963,6 @@ impl<'a> BonsaiModel<'a> {
                 return Err("missing GPU handle".into());
             }
         }
-
-        // Batch embedding lookup: build hidden_batch [batch × hidden]
         let mut hidden_batch = vec![0.0f32; batch_size * h];
         for (t, &token_id) in token_ids.iter().enumerate() {
             let embd_start = token_id as usize * h;
@@ -898,8 +978,6 @@ impl<'a> BonsaiModel<'a> {
             hidden_batch[t * h..(t + 1) * h]
                 .copy_from_slice(&self.token_embd[embd_start..embd_end]);
         }
-
-        // Build RoPE tables: cos_table[batch × half_dim], sin_table[batch × half_dim]
         let mut cos_table = vec![0.0f32; batch_size * half_dim];
         let mut sin_table = vec![0.0f32; batch_size * half_dim];
         for t in 0..batch_size {
@@ -909,24 +987,23 @@ impl<'a> BonsaiModel<'a> {
             cos_table[t * half_dim..(t + 1) * half_dim].copy_from_slice(cos_vals);
             sin_table[t * half_dim..(t + 1) * half_dim].copy_from_slice(sin_vals);
         }
-
-        // Build QKV concat bytes per layer
         let mut qkv_concats: Vec<Vec<u8>> = Vec::with_capacity(n_layers);
         for block in &self.blocks {
-            let q_bytes = blocks_as_bytes(block.attn_q_blocks());
-            let k_bytes = blocks_as_bytes(block.attn_k_blocks());
-            let v_bytes = blocks_as_bytes(block.attn_v_blocks());
+            let q_bytes =
+                blocks_as_bytes(block.attn_q_blocks().ok_or("attn_q: not a 1-bit layer")?);
+            let k_bytes =
+                blocks_as_bytes(block.attn_k_blocks().ok_or("attn_k: not a 1-bit layer")?);
+            let v_bytes =
+                blocks_as_bytes(block.attn_v_blocks().ok_or("attn_v: not a 1-bit layer")?);
             let mut concat = Vec::with_capacity(q_bytes.len() + k_bytes.len() + v_bytes.len());
             concat.extend_from_slice(q_bytes);
             concat.extend_from_slice(k_bytes);
             concat.extend_from_slice(v_bytes);
             qkv_concats.push(concat);
         }
-
         let mut layer_params: Vec<FullForwardLayerParams<'_>> = Vec::with_capacity(n_layers);
         for (i, block) in self.blocks.iter().enumerate() {
             let norm_handle_base = 1_000_000u64 + (block.layer_index() as u64) * 10;
-
             layer_params.push(FullForwardLayerParams {
                 attn_norm_handle: norm_handle_base,
                 attn_norm_bytes: block.attn_norm_weight(),
@@ -943,32 +1020,40 @@ impl<'a> BonsaiModel<'a> {
                     .attn_output_gpu_handle()
                     .map(|hnd| hnd.id())
                     .unwrap_or(0),
-                attn_proj_bytes: blocks_as_bytes(block.attn_output_blocks()),
+                attn_proj_bytes: blocks_as_bytes(
+                    block
+                        .attn_output_blocks()
+                        .ok_or("attn_output: not a 1-bit layer")?,
+                ),
                 ffn_norm_handle: norm_handle_base + 3,
                 ffn_norm_bytes: block.ffn_norm_weight(),
                 gate_up_handle: block
                     .fused_gate_up_gpu_handle()
                     .map(|hnd| hnd.id())
                     .unwrap_or(0),
-                gate_bytes: blocks_as_bytes(block.ffn_gate_blocks()),
-                up_bytes: blocks_as_bytes(block.ffn_up_blocks()),
+                gate_bytes: blocks_as_bytes(
+                    block
+                        .ffn_gate_blocks()
+                        .ok_or("ffn_gate: not a 1-bit layer")?,
+                ),
+                up_bytes: blocks_as_bytes(
+                    block.ffn_up_blocks().ok_or("ffn_up: not a 1-bit layer")?,
+                ),
                 down_handle: block.ffn_down_gpu_handle().map(|hnd| hnd.id()).unwrap_or(0),
-                down_bytes: blocks_as_bytes(block.ffn_down_blocks()),
+                down_bytes: blocks_as_bytes(
+                    block
+                        .ffn_down_blocks()
+                        .ok_or("ffn_down: not a 1-bit layer")?,
+                ),
             });
         }
-
-        // Final norm weight and eps
         let final_norm_handle = 2_000_000u64;
         let final_norm_bytes = self.output_norm.weight();
         let final_norm_eps = self.output_norm.eps();
-
-        // LM head weight
         let lm_head_handle = 3_000_000u64;
         let lm_head_bytes = blocks_as_bytes(lm_head_linear.blocks());
         let lm_head_out_features = lm_head_linear.out_features();
-
         let mut batch_token_ids: Vec<u32> = Vec::with_capacity(batch_size);
-
         oxibonsai_kernels::try_metal_full_forward_prefill_verify(
             &hidden_batch,
             batch_size,
@@ -993,13 +1078,11 @@ impl<'a> BonsaiModel<'a> {
             &mut batch_token_ids,
         )
         .map_err(|e| {
-            tracing::warn!(error = %e, "batch prefill verify GPU dispatch failed");
+            tracing::warn!(error = % e, "batch prefill verify GPU dispatch failed");
             Box::new(e) as Box<dyn std::error::Error>
         })?;
-
         Ok(batch_token_ids)
     }
-
     /// Greedy forward pass: runs all layers + LM head + argmax entirely on GPU.
     ///
     /// Instead of downloading the full logits vector (~607KB), this performs
@@ -1032,15 +1115,14 @@ impl<'a> BonsaiModel<'a> {
         let final_norm_eps = self.output_norm.eps();
         let lm_head_out_features = match &self.output_weight {
             OutputWeight::OneBit(linear) => linear.out_features(),
+            OutputWeight::Ternary(_) => {
+                return Err("ternary LM head not supported on greedy GPU path".into());
+            }
             OutputWeight::Fp32 { .. } => {
                 return Err("FP32 LM head not supported on greedy GPU path".into());
             }
         };
-
-        // Ensure GPU weights are cached (no-op after first token)
         self.get_or_create_gpu_cache()?;
-
-        // Embedding lookup (CPU — 16KB)
         let embd_start = token_id as usize * h;
         let embd_end = embd_start + h;
         if embd_end > self.token_embd.len() {
@@ -1052,19 +1134,14 @@ impl<'a> BonsaiModel<'a> {
             .into());
         }
         let mut hidden = self.token_embd[embd_start..embd_end].to_vec();
-
         let rope_cos = self.rope.cos_at(pos);
         let rope_sin = self.rope.sin_at(pos);
-
         let mut greedy_token_id: u32 = 0;
-
-        // Fast path: use cached GPU weight handles (no allocation, no upload)
         let guard = self
             .gpu_weight_cache
             .lock()
             .map_err(|e| format!("gpu_weight_cache lock: {e}"))?;
         let cached = guard.as_ref().ok_or("GPU weight cache not populated")?;
-
         oxibonsai_kernels::try_metal_full_forward_cached(
             &mut hidden,
             pos,
@@ -1080,23 +1157,19 @@ impl<'a> BonsaiModel<'a> {
             max_seq_len,
             final_norm_eps,
             lm_head_out_features,
-            None, // no logits download
+            None,
             Some(&mut greedy_token_id),
         )
         .map_err(|e| {
-            tracing::warn!(error = %e, "cached greedy GPU forward failed");
+            tracing::warn!(error = % e, "cached greedy GPU forward failed");
             Box::new(e) as Box<dyn std::error::Error>
         })?;
-
         Ok(greedy_token_id)
     }
-
     /// Build and cache GPU weight handles on first call; no-op on subsequent calls.
     #[cfg(all(feature = "metal", target_os = "macos"))]
     pub fn get_or_create_gpu_cache(&self) -> Result<(), Box<dyn std::error::Error>> {
         use oxibonsai_kernels::FullForwardLayerParams;
-
-        // Fast path: already cached
         {
             let guard = self
                 .gpu_weight_cache
@@ -1106,27 +1179,32 @@ impl<'a> BonsaiModel<'a> {
                 return Ok(());
             }
         }
-
-        // Slow path: build the cache (first token only)
         let n_layers = self.blocks.len();
+        if matches!(&self.output_weight, OutputWeight::Ternary(_)) {
+            return Ok(());
+        }
+        if self.blocks.iter().any(|b| b.attn_q_blocks().is_none()) {
+            return Ok(());
+        }
         let lm_head_linear = match &self.output_weight {
             OutputWeight::OneBit(ref linear) => linear,
             OutputWeight::Fp32 { .. } => return Err("FP32 LM head not supported".into()),
+            OutputWeight::Ternary(_) => unreachable!("ternary guard above"),
         };
-
-        // Build QKV concats (only happens ONCE)
         let mut qkv_concats: Vec<Vec<u8>> = Vec::with_capacity(n_layers);
         for block in &self.blocks {
-            let q_bytes = blocks_as_bytes(block.attn_q_blocks());
-            let k_bytes = blocks_as_bytes(block.attn_k_blocks());
-            let v_bytes = blocks_as_bytes(block.attn_v_blocks());
+            let q_bytes =
+                blocks_as_bytes(block.attn_q_blocks().ok_or("attn_q: not a 1-bit layer")?);
+            let k_bytes =
+                blocks_as_bytes(block.attn_k_blocks().ok_or("attn_k: not a 1-bit layer")?);
+            let v_bytes =
+                blocks_as_bytes(block.attn_v_blocks().ok_or("attn_v: not a 1-bit layer")?);
             let mut concat = Vec::with_capacity(q_bytes.len() + k_bytes.len() + v_bytes.len());
             concat.extend_from_slice(q_bytes);
             concat.extend_from_slice(k_bytes);
             concat.extend_from_slice(v_bytes);
             qkv_concats.push(concat);
         }
-
         let mut layer_params: Vec<FullForwardLayerParams<'_>> = Vec::with_capacity(n_layers);
         for (i, block) in self.blocks.iter().enumerate() {
             let norm_handle_base = 1_000_000u64 + (block.layer_index() as u64) * 10;
@@ -1146,25 +1224,37 @@ impl<'a> BonsaiModel<'a> {
                     .attn_output_gpu_handle()
                     .map(|hnd| hnd.id())
                     .unwrap_or(0),
-                attn_proj_bytes: blocks_as_bytes(block.attn_output_blocks()),
+                attn_proj_bytes: blocks_as_bytes(
+                    block
+                        .attn_output_blocks()
+                        .ok_or("attn_output: not a 1-bit layer")?,
+                ),
                 ffn_norm_handle: norm_handle_base + 3,
                 ffn_norm_bytes: block.ffn_norm_weight(),
                 gate_up_handle: block
                     .fused_gate_up_gpu_handle()
                     .map(|hnd| hnd.id())
                     .unwrap_or(0),
-                gate_bytes: blocks_as_bytes(block.ffn_gate_blocks()),
-                up_bytes: blocks_as_bytes(block.ffn_up_blocks()),
+                gate_bytes: blocks_as_bytes(
+                    block
+                        .ffn_gate_blocks()
+                        .ok_or("ffn_gate: not a 1-bit layer")?,
+                ),
+                up_bytes: blocks_as_bytes(
+                    block.ffn_up_blocks().ok_or("ffn_up: not a 1-bit layer")?,
+                ),
                 down_handle: block.ffn_down_gpu_handle().map(|hnd| hnd.id()).unwrap_or(0),
-                down_bytes: blocks_as_bytes(block.ffn_down_blocks()),
+                down_bytes: blocks_as_bytes(
+                    block
+                        .ffn_down_blocks()
+                        .ok_or("ffn_down: not a 1-bit layer")?,
+                ),
             });
         }
-
         let final_norm_handle = 2_000_000u64;
         let final_norm_bytes = self.output_norm.weight();
         let lm_head_handle = 3_000_000u64;
         let lm_head_bytes = blocks_as_bytes(lm_head_linear.blocks());
-
         let cached = oxibonsai_kernels::build_cached_weights(
             &layer_params,
             final_norm_handle,
@@ -1173,22 +1263,14 @@ impl<'a> BonsaiModel<'a> {
             lm_head_bytes,
         )
         .map_err(|e| format!("build_cached_weights: {e}"))?;
-
         let mut guard = self
             .gpu_weight_cache
             .lock()
             .map_err(|e| format!("gpu_weight_cache lock: {e}"))?;
         *guard = Some(cached);
-
         tracing::info!("GPU weight cache populated (all subsequent tokens use cached handles)");
-
         Ok(())
     }
-
-    // ──────────────────────────────────────────────────────────────────────
-    // CUDA GPU inference paths (Linux / Windows)
-    // ──────────────────────────────────────────────────────────────────────
-
     /// Get or build the cached per-layer QKV byte concatenations for the CUDA path.
     ///
     /// On first call the vectors are built and stored in `cuda_qkv_cache`.
@@ -1208,20 +1290,21 @@ impl<'a> BonsaiModel<'a> {
             return Ok(std::sync::Arc::clone(cache));
         }
         drop(guard);
-
         let n_layers = self.blocks.len();
         let mut qkv_concats: Vec<Vec<u8>> = Vec::with_capacity(n_layers);
         for block in &self.blocks {
-            let q_bytes = blocks_as_bytes(block.attn_q_blocks());
-            let k_bytes = blocks_as_bytes(block.attn_k_blocks());
-            let v_bytes = blocks_as_bytes(block.attn_v_blocks());
+            let q_bytes =
+                blocks_as_bytes(block.attn_q_blocks().ok_or("attn_q: not a 1-bit layer")?);
+            let k_bytes =
+                blocks_as_bytes(block.attn_k_blocks().ok_or("attn_k: not a 1-bit layer")?);
+            let v_bytes =
+                blocks_as_bytes(block.attn_v_blocks().ok_or("attn_v: not a 1-bit layer")?);
             let mut concat = Vec::with_capacity(q_bytes.len() + k_bytes.len() + v_bytes.len());
             concat.extend_from_slice(q_bytes);
             concat.extend_from_slice(k_bytes);
             concat.extend_from_slice(v_bytes);
             qkv_concats.push(concat);
         }
-
         let mut guard = self
             .cuda_qkv_cache
             .lock()
@@ -1230,7 +1313,6 @@ impl<'a> BonsaiModel<'a> {
         *guard = Some(std::sync::Arc::clone(&arc));
         Ok(arc)
     }
-
     /// Build per-layer `CudaFullForwardLayerParams` using cached QKV bytes.
     #[cfg(all(
         feature = "native-cuda",
@@ -1249,13 +1331,14 @@ impl<'a> BonsaiModel<'a> {
             Vec::with_capacity(n_layers);
         for (i, block) in self.blocks.iter().enumerate() {
             let norm_handle_base = 1_000_000u64 + (block.layer_index() as u64) * 10;
+            let weight_handle_base = 2_000_000u64 + (block.layer_index() as u64) * 4;
             layer_params.push(oxibonsai_kernels::CudaFullForwardLayerParams {
                 attn_norm_handle: norm_handle_base,
                 attn_norm_bytes: block.attn_norm_weight(),
                 fused_qkv_handle: block
                     .fused_qkv_gpu_handle()
                     .map(|hnd| hnd.id())
-                    .unwrap_or(0),
+                    .unwrap_or(weight_handle_base),
                 fused_qkv_bytes: &qkv_concats[i],
                 q_norm_handle: norm_handle_base + 1,
                 q_norm_bytes: block.q_norm_weight(),
@@ -1264,23 +1347,39 @@ impl<'a> BonsaiModel<'a> {
                 attn_proj_handle: block
                     .attn_output_gpu_handle()
                     .map(|hnd| hnd.id())
-                    .unwrap_or(0),
-                attn_proj_bytes: blocks_as_bytes(block.attn_output_blocks()),
+                    .unwrap_or(weight_handle_base + 1),
+                attn_proj_bytes: blocks_as_bytes(
+                    block
+                        .attn_output_blocks()
+                        .ok_or("attn_output: not a 1-bit layer")?,
+                ),
                 ffn_norm_handle: norm_handle_base + 3,
                 ffn_norm_bytes: block.ffn_norm_weight(),
                 gate_up_handle: block
                     .fused_gate_up_gpu_handle()
                     .map(|hnd| hnd.id())
-                    .unwrap_or(0),
-                gate_bytes: blocks_as_bytes(block.ffn_gate_blocks()),
-                up_bytes: blocks_as_bytes(block.ffn_up_blocks()),
-                down_handle: block.ffn_down_gpu_handle().map(|hnd| hnd.id()).unwrap_or(0),
-                down_bytes: blocks_as_bytes(block.ffn_down_blocks()),
+                    .unwrap_or(weight_handle_base + 2),
+                gate_bytes: blocks_as_bytes(
+                    block
+                        .ffn_gate_blocks()
+                        .ok_or("ffn_gate: not a 1-bit layer")?,
+                ),
+                up_bytes: blocks_as_bytes(
+                    block.ffn_up_blocks().ok_or("ffn_up: not a 1-bit layer")?,
+                ),
+                down_handle: block
+                    .ffn_down_gpu_handle()
+                    .map(|hnd| hnd.id())
+                    .unwrap_or(weight_handle_base + 3),
+                down_bytes: blocks_as_bytes(
+                    block
+                        .ffn_down_blocks()
+                        .ok_or("ffn_down: not a 1-bit layer")?,
+                ),
             });
         }
         Ok(layer_params)
     }
-
     /// Attempt to run all transformer layers (layers only, no LM head) on CUDA GPU.
     ///
     /// On success, returns the post-layers hidden state as a `Vec<f32>` which the
@@ -1299,7 +1398,6 @@ impl<'a> BonsaiModel<'a> {
         if n_layers == 0 {
             return Err("no blocks".into());
         }
-
         let eps = self.blocks[0].attn_norm_eps();
         let h = self.config.hidden_size;
         let inter = self.config.intermediate_size;
@@ -1308,13 +1406,10 @@ impl<'a> BonsaiModel<'a> {
         let hd = self.config.head_dim;
         let heads_per_group = if nkv > 0 { nq / nkv } else { 1 };
         let max_seq_len = self.kv_cache.max_seq_len();
-
         let qkv_concats = self.get_or_build_cuda_qkv_cache()?;
         let layer_params = self.build_cuda_layer_params(&*qkv_concats)?;
-
         let rope_cos = self.rope.cos_at(pos);
         let rope_sin = self.rope.sin_at(pos);
-
         oxibonsai_kernels::try_cuda_full_forward(
             hidden,
             &layer_params,
@@ -1329,7 +1424,6 @@ impl<'a> BonsaiModel<'a> {
             h,
             inter,
             max_seq_len,
-            // layers only — no final norm fusion
             None,
             0,
         )
@@ -1338,7 +1432,6 @@ impl<'a> BonsaiModel<'a> {
             Box::<dyn std::error::Error>::from("CUDA layers-only forward returned None")
         })
     }
-
     /// Attempt to run all transformer layers + final RMSNorm + LM head on CUDA GPU.
     ///
     /// On success, returns the output logits vector directly (no intermediate allocation).
@@ -1357,15 +1450,15 @@ impl<'a> BonsaiModel<'a> {
         if n_layers == 0 {
             return Err("no blocks".into());
         }
-
-        // Only support 1-bit LM head on GPU
         let lm_head_linear = match &self.output_weight {
             OutputWeight::OneBit(linear) => linear,
+            OutputWeight::Ternary(_) => {
+                return Err("ternary LM head not supported on CUDA fused GPU path".into());
+            }
             OutputWeight::Fp32 { .. } => {
                 return Err("FP32 LM head not supported on CUDA fused GPU path".into());
             }
         };
-
         let eps = self.blocks[0].attn_norm_eps();
         let h = self.config.hidden_size;
         let inter = self.config.intermediate_size;
@@ -1374,19 +1467,15 @@ impl<'a> BonsaiModel<'a> {
         let hd = self.config.head_dim;
         let heads_per_group = if nkv > 0 { nq / nkv } else { 1 };
         let max_seq_len = self.kv_cache.max_seq_len();
-
         let final_norm_handle = 2_000_000u64;
         let final_norm_bytes = self.output_norm.weight();
         let lm_head_handle = 4_000_000u64;
         let lm_head_bytes = blocks_as_bytes(lm_head_linear.blocks());
         let vocab_size = lm_head_linear.out_features();
-
         let qkv_concats = self.get_or_build_cuda_qkv_cache()?;
         let layer_params = self.build_cuda_layer_params(&*qkv_concats)?;
-
         let rope_cos = self.rope.cos_at(pos);
         let rope_sin = self.rope.sin_at(pos);
-
         match oxibonsai_kernels::try_cuda_full_forward_with_gpu_lm_head(
             hidden,
             &layer_params,
@@ -1414,7 +1503,6 @@ impl<'a> BonsaiModel<'a> {
             }
         }
     }
-
     /// GPU batch prefill implementation (CUDA): all layers + final norm + LM head.
     ///
     /// Returns the last token's logits.
@@ -1432,14 +1520,15 @@ impl<'a> BonsaiModel<'a> {
         if n_layers == 0 {
             return Err("no blocks".into());
         }
-
         let lm_head_linear = match &self.output_weight {
             OutputWeight::OneBit(linear) => linear,
+            OutputWeight::Ternary(_) => {
+                return Err("ternary LM head not supported on CUDA prefill path".into());
+            }
             OutputWeight::Fp32 { .. } => {
                 return Err("FP32 LM head not supported on CUDA prefill path".into());
             }
         };
-
         let eps = self.blocks[0].attn_norm_eps();
         let h = self.config.hidden_size;
         let inter = self.config.intermediate_size;
@@ -1449,8 +1538,6 @@ impl<'a> BonsaiModel<'a> {
         let half_dim = hd / 2;
         let heads_per_group = if nkv > 0 { nq / nkv } else { 1 };
         let max_seq_len = self.kv_cache.max_seq_len();
-
-        // Batch embedding lookup: build hidden_batch [batch × hidden]
         let mut hidden_batch = vec![0.0f32; batch_size * h];
         for (t, &token_id) in token_ids.iter().enumerate() {
             let embd_start = token_id as usize * h;
@@ -1466,8 +1553,6 @@ impl<'a> BonsaiModel<'a> {
             hidden_batch[t * h..(t + 1) * h]
                 .copy_from_slice(&self.token_embd[embd_start..embd_end]);
         }
-
-        // Build RoPE tables: cos_table[batch × half_dim], sin_table[batch × half_dim]
         let mut cos_table = vec![0.0f32; batch_size * half_dim];
         let mut sin_table = vec![0.0f32; batch_size * half_dim];
         for t in 0..batch_size {
@@ -1477,19 +1562,15 @@ impl<'a> BonsaiModel<'a> {
             cos_table[t * half_dim..(t + 1) * half_dim].copy_from_slice(cos_vals);
             sin_table[t * half_dim..(t + 1) * half_dim].copy_from_slice(sin_vals);
         }
-
         let final_norm_handle = 2_000_000u64;
         let final_norm_bytes = self.output_norm.weight();
         let final_norm_eps = self.output_norm.eps();
         let lm_head_handle = 3_000_000u64;
         let lm_head_bytes = blocks_as_bytes(lm_head_linear.blocks());
         let lm_head_out_features = lm_head_linear.out_features();
-
         let qkv_concats = self.get_or_build_cuda_qkv_cache()?;
         let layer_params = self.build_cuda_layer_params(&*qkv_concats)?;
-
         let mut logits = vec![0.0f32; lm_head_out_features];
-
         oxibonsai_kernels::try_cuda_prefill(
             &hidden_batch,
             batch_size,
@@ -1516,13 +1597,11 @@ impl<'a> BonsaiModel<'a> {
             None,
         )
         .map_err(|e| {
-            tracing::warn!(error = %e, "CUDA batch prefill dispatch failed");
+            tracing::warn!(error = % e, "CUDA batch prefill dispatch failed");
             Box::new(e) as Box<dyn std::error::Error>
         })?;
-
         Ok(logits)
     }
-
     /// GPU batch prefill verify (CUDA): all layers + final norm + LM head + argmax.
     ///
     /// Returns the greedy argmax token ID for each input position.
@@ -1540,14 +1619,15 @@ impl<'a> BonsaiModel<'a> {
         if n_layers == 0 {
             return Err("no blocks".into());
         }
-
         let lm_head_linear = match &self.output_weight {
             OutputWeight::OneBit(linear) => linear,
+            OutputWeight::Ternary(_) => {
+                return Err("ternary LM head not supported on CUDA prefill verify path".into());
+            }
             OutputWeight::Fp32 { .. } => {
                 return Err("FP32 LM head not supported on CUDA prefill verify path".into());
             }
         };
-
         let eps = self.blocks[0].attn_norm_eps();
         let h = self.config.hidden_size;
         let inter = self.config.intermediate_size;
@@ -1557,8 +1637,6 @@ impl<'a> BonsaiModel<'a> {
         let half_dim = hd / 2;
         let heads_per_group = if nkv > 0 { nq / nkv } else { 1 };
         let max_seq_len = self.kv_cache.max_seq_len();
-
-        // Batch embedding lookup
         let mut hidden_batch = vec![0.0f32; batch_size * h];
         for (t, &token_id) in token_ids.iter().enumerate() {
             let embd_start = token_id as usize * h;
@@ -1574,8 +1652,6 @@ impl<'a> BonsaiModel<'a> {
             hidden_batch[t * h..(t + 1) * h]
                 .copy_from_slice(&self.token_embd[embd_start..embd_end]);
         }
-
-        // Build RoPE tables
         let mut cos_table = vec![0.0f32; batch_size * half_dim];
         let mut sin_table = vec![0.0f32; batch_size * half_dim];
         for t in 0..batch_size {
@@ -1585,21 +1661,14 @@ impl<'a> BonsaiModel<'a> {
             cos_table[t * half_dim..(t + 1) * half_dim].copy_from_slice(cos_vals);
             sin_table[t * half_dim..(t + 1) * half_dim].copy_from_slice(sin_vals);
         }
-
         let final_norm_handle = 2_000_000u64;
         let final_norm_bytes = self.output_norm.weight();
         let final_norm_eps = self.output_norm.eps();
         let lm_head_handle = 3_000_000u64;
         let lm_head_bytes = blocks_as_bytes(lm_head_linear.blocks());
         let lm_head_out_features = lm_head_linear.out_features();
-
         let qkv_concats = self.get_or_build_cuda_qkv_cache()?;
         let layer_params = self.build_cuda_layer_params(&*qkv_concats)?;
-
-        // For verify mode: use greedy_token_id_out populated in a loop over all positions.
-        // try_cuda_prefill writes the last-position greedy token only; for full per-position
-        // verify we run it sequentially per token (batch_size times), updating pos_start.
-        // This is equivalent to the CPU fallback but executes transformer layers on GPU.
         let mut token_ids_out: Vec<u32> = Vec::with_capacity(batch_size);
         for t in 0..batch_size {
             let single_embd_start = token_ids[t] as usize * h;
@@ -1608,7 +1677,6 @@ impl<'a> BonsaiModel<'a> {
             let t_half = half_dim;
             let cos_single = &cos_table[t * t_half..(t + 1) * t_half];
             let sin_single = &sin_table[t * t_half..(t + 1) * t_half];
-
             let mut greedy_id: u32 = 0;
             oxibonsai_kernels::try_cuda_prefill(
                 &single_hidden,
@@ -1636,15 +1704,15 @@ impl<'a> BonsaiModel<'a> {
                 Some(&mut greedy_id),
             )
             .map_err(|e| {
-                tracing::warn!(error = %e, "CUDA prefill verify dispatch failed at pos {pos}");
+                tracing::warn!(
+                    error = % e, "CUDA prefill verify dispatch failed at pos {pos}"
+                );
                 Box::new(e) as Box<dyn std::error::Error>
             })?;
             token_ids_out.push(greedy_id);
         }
-
         Ok(token_ids_out)
     }
-
     /// Forward pass for a single token at position `pos`.
     ///
     /// Returns logits over the vocabulary `[vocab_size]`.
@@ -1663,8 +1731,6 @@ impl<'a> BonsaiModel<'a> {
                 max_ctx: self.kv_cache.max_seq_len(),
             });
         }
-
-        // 1. Token embedding lookup
         let embd_start = token_id as usize * h;
         let embd_end = embd_start + h;
         if embd_end > self.token_embd.len() {
@@ -1677,14 +1743,7 @@ impl<'a> BonsaiModel<'a> {
             });
         }
         let mut hidden = self.token_embd[embd_start..embd_end].to_vec();
-
-        // 2. Forward through all Transformer blocks
-        //    Try fused GPU path first (all layers + norm + LM head in one cmd buf),
-        //    then multi-layer GPU without LM head, then per-layer CPU fallback.
         let t_blocks_start = std::time::Instant::now();
-
-        // Try fused GPU path: 36 layers + final norm + LM head in ONE command buffer
-        // macOS: try Metal first
         #[cfg(all(feature = "metal", target_os = "macos"))]
         {
             let mut fused_logits = vec![0.0f32; vocab];
@@ -1694,15 +1753,13 @@ impl<'a> BonsaiModel<'a> {
             {
                 let t_elapsed = t_blocks_start.elapsed();
                 tracing::debug!(
-                    target: "fwd_profile",
-                    "pos={pos} fused_gpu={:.1}ms (metal layers+norm+lm_head)",
-                    t_elapsed.as_secs_f64() * 1000.0,
+                    target : "fwd_profile",
+                    "pos={pos} fused_gpu={:.1}ms (metal layers+norm+lm_head)", t_elapsed
+                    .as_secs_f64() * 1000.0,
                 );
                 return Ok(fused_logits);
             }
         }
-
-        // Linux / Windows: try CUDA fused path (layers + norm + LM head)
         #[cfg(all(
             feature = "native-cuda",
             not(all(feature = "metal", target_os = "macos")),
@@ -1713,13 +1770,16 @@ impl<'a> BonsaiModel<'a> {
                 return Ok(fused_logits);
             }
         }
-
-        // Fallback: try multi-layer GPU (layers only), then per-layer CPU
-        // macOS Metal layers-only path
         #[cfg(all(feature = "metal", target_os = "macos"))]
-        let did_full_forward = self.try_metal_full_forward_inner(&mut hidden, pos).is_ok();
-
-        // Linux / Windows CUDA layers-only path
+        let did_full_forward = {
+            let q1_ok = self.try_metal_full_forward_inner(&mut hidden, pos).is_ok();
+            if q1_ok {
+                true
+            } else {
+                self.try_metal_full_forward_ternary_inner(&mut hidden, pos)
+                    .is_ok()
+            }
+        };
         #[cfg(all(
             feature = "native-cuda",
             not(all(feature = "metal", target_os = "macos")),
@@ -1732,7 +1792,6 @@ impl<'a> BonsaiModel<'a> {
             }
             Err(_) => false,
         };
-
         #[cfg(not(any(
             all(feature = "metal", target_os = "macos"),
             all(
@@ -1742,33 +1801,30 @@ impl<'a> BonsaiModel<'a> {
             )
         )))]
         let did_full_forward = false;
-
         if !did_full_forward {
             for block in &self.blocks {
                 block.forward(&mut hidden, pos, &mut self.kv_cache, &self.rope, kernel)?;
             }
         }
         let t_blocks_elapsed = t_blocks_start.elapsed();
-
-        // 3. Final RMSNorm
         let t_norm_start = std::time::Instant::now();
         let mut normed = vec![0.0f32; h];
         self.output_norm.forward(&hidden, &mut normed)?;
         let t_norm_elapsed = t_norm_start.elapsed();
-
-        // 4. LM head projection → logits
         let t_lm_start = std::time::Instant::now();
         let mut logits = vec![0.0f32; vocab];
         match &self.output_weight {
             OutputWeight::OneBit(linear) => {
-                linear.forward_vec(&normed, &mut logits, kernel)?;
+                linear.forward_vec(&normed, &mut logits)?;
+            }
+            OutputWeight::Ternary(linear) => {
+                linear.forward(&normed, &mut logits)?;
             }
             OutputWeight::Fp32 {
                 weights,
                 out_features,
                 in_features,
             } => {
-                // FP32 matmul: logits[i] = dot(weights[i*in..], normed)
                 for (i, logit) in logits.iter_mut().enumerate().take(*out_features) {
                     let row_start = i * in_features;
                     let mut sum = 0.0f32;
@@ -1780,71 +1836,22 @@ impl<'a> BonsaiModel<'a> {
             }
         }
         let t_lm_elapsed = t_lm_start.elapsed();
-
         tracing::debug!(
-            target: "fwd_profile",
+            target : "fwd_profile",
             "pos={pos} blocks={:.1}ms norm={:.1}ms lm_head={:.1}ms gpu={}",
-            t_blocks_elapsed.as_secs_f64() * 1000.0,
-            t_norm_elapsed.as_secs_f64() * 1000.0,
-            t_lm_elapsed.as_secs_f64() * 1000.0,
-            did_full_forward,
+            t_blocks_elapsed.as_secs_f64() * 1000.0, t_norm_elapsed.as_secs_f64() *
+            1000.0, t_lm_elapsed.as_secs_f64() * 1000.0, did_full_forward,
         );
-
         Ok(logits)
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn model_creation() {
-        let config = Qwen3Config::bonsai_8b();
-        let model = BonsaiModel::new(config);
-        assert_eq!(model.config().num_layers, 36);
-        assert_eq!(model.config().hidden_size, 4096);
-    }
-
-    #[test]
-    fn model_new_has_empty_blocks() {
-        let config = Qwen3Config::bonsai_8b();
-        let model = BonsaiModel::new(config);
-        assert_eq!(model.blocks.len(), 0);
-    }
-
-    #[test]
-    fn model_variant_detection() {
-        let model_8b = BonsaiModel::new(Qwen3Config::bonsai_8b());
-        assert_eq!(model_8b.variant(), ModelVariant::Bonsai8B);
-
-        let model_4b = BonsaiModel::new(Qwen3Config::bonsai_4b());
-        assert_eq!(model_4b.variant(), ModelVariant::Bonsai4B);
-
-        let model_1_7b = BonsaiModel::new(Qwen3Config::bonsai_1_7b());
-        assert_eq!(model_1_7b.variant(), ModelVariant::Bonsai1_7B);
-    }
-
-    #[test]
-    fn model_info_methods() {
-        let model = BonsaiModel::new(Qwen3Config::bonsai_8b());
-        assert_eq!(model.num_layers(), 36);
-        assert_eq!(model.hidden_size(), 4096);
-        assert_eq!(model.context_length(), 65536);
-        assert!(model.num_parameters() > 0);
-        assert!(model.model_size_bytes() > 0);
-    }
-
-    #[test]
-    fn model_reset_cache() {
-        let mut model = BonsaiModel::new(Qwen3Config::bonsai_8b());
-        model.reset_cache();
-        assert_eq!(model.kv_cache_mut().seq_len(), 0);
-    }
-
-    #[test]
-    fn model_kv_cache_memory() {
-        let model = BonsaiModel::new(Qwen3Config::bonsai_8b());
-        assert!(model.kv_cache_memory_bytes() > 0);
-    }
+/// Output projection can be 1-bit, ternary, or FP32 depending on the model.
+pub(super) enum OutputWeight<'a> {
+    OneBit(Linear1Bit<'a>),
+    Ternary(LinearTernary<'a>),
+    Fp32 {
+        weights: Vec<f32>,
+        out_features: usize,
+        in_features: usize,
+    },
 }

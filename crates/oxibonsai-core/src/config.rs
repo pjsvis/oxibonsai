@@ -193,6 +193,29 @@ impl Qwen3Config {
             model_name: "Bonsai-8B".to_string(),
         }
     }
+
+    /// Create a Ternary-Bonsai-8B configuration.
+    ///
+    /// Same architecture as Bonsai-8B but with ternary ({-1,0,+1}) weights.
+    pub fn ternary_bonsai_8b() -> Self {
+        let mut cfg = Self::bonsai_8b();
+        cfg.model_name = "Ternary-Bonsai-8B".to_string();
+        cfg
+    }
+
+    /// Create a Ternary-Bonsai-4B configuration.
+    pub fn ternary_bonsai_4b() -> Self {
+        let mut cfg = Self::bonsai_4b();
+        cfg.model_name = "Ternary-Bonsai-4B".to_string();
+        cfg
+    }
+
+    /// Create a Ternary-Bonsai-1.7B configuration.
+    pub fn ternary_bonsai_1_7b() -> Self {
+        let mut cfg = Self::bonsai_1_7b();
+        cfg.model_name = "Ternary-Bonsai-1.7B".to_string();
+        cfg
+    }
 }
 
 #[cfg(test)]
@@ -243,5 +266,52 @@ mod tests {
             .expect("config from empty metadata should use defaults");
         assert_eq!(config.hidden_size, 4096);
         assert_eq!(config.num_layers, 36);
+    }
+
+    #[test]
+    fn ternary_bonsai_8b_matches_spec() {
+        let cfg = Qwen3Config::ternary_bonsai_8b();
+        assert_eq!(cfg.hidden_size, 4096);
+        assert_eq!(cfg.intermediate_size, 14336);
+        assert_eq!(cfg.num_layers, 36);
+        assert_eq!(cfg.num_attention_heads, 32);
+        assert_eq!(cfg.num_kv_heads, 8);
+        assert_eq!(cfg.head_dim, 128);
+        assert_eq!(cfg.vocab_size, 151936);
+        assert_eq!(cfg.max_context_length, 65536);
+        assert_eq!(cfg.model_name, "Ternary-Bonsai-8B");
+        assert_eq!(cfg.architecture, "qwen3");
+    }
+
+    #[test]
+    fn ternary_bonsai_name_distinct() {
+        assert_ne!(
+            Qwen3Config::bonsai_8b().model_name,
+            Qwen3Config::ternary_bonsai_8b().model_name
+        );
+        assert_ne!(
+            Qwen3Config::bonsai_4b().model_name,
+            Qwen3Config::ternary_bonsai_4b().model_name
+        );
+        assert_ne!(
+            Qwen3Config::bonsai_1_7b().model_name,
+            Qwen3Config::ternary_bonsai_1_7b().model_name
+        );
+    }
+
+    #[test]
+    fn ternary_bonsai_4b_matches_spec() {
+        let cfg = Qwen3Config::ternary_bonsai_4b();
+        assert_eq!(cfg.hidden_size, 2560);
+        assert_eq!(cfg.num_layers, 24);
+        assert_eq!(cfg.model_name, "Ternary-Bonsai-4B");
+    }
+
+    #[test]
+    fn ternary_bonsai_1_7b_matches_spec() {
+        let cfg = Qwen3Config::ternary_bonsai_1_7b();
+        assert_eq!(cfg.hidden_size, 1536);
+        assert_eq!(cfg.num_layers, 16);
+        assert_eq!(cfg.model_name, "Ternary-Bonsai-1.7B");
     }
 }

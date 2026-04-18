@@ -88,6 +88,7 @@ fn different_seeds_may_differ() {
         top_k: 0,
         top_p: 1.0,
         repetition_penalty: 1.0,
+        max_tokens: 128,
     };
     let mut engine_a = InferenceEngine::new(Qwen3Config::tiny_test(), params.clone(), 42);
     let mut engine_b = InferenceEngine::new(Qwen3Config::tiny_test(), params, 12345);

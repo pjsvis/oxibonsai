@@ -25,6 +25,8 @@ pub struct SamplingParams {
     pub top_p: f32,
     /// Repetition penalty (1.0 = disabled).
     pub repetition_penalty: f32,
+    /// Maximum number of new tokens to generate per request.
+    pub max_tokens: usize,
 }
 
 impl Default for SamplingParams {
@@ -34,6 +36,7 @@ impl Default for SamplingParams {
             top_k: 40,
             top_p: 0.9,
             repetition_penalty: 1.1,
+            max_tokens: 128,
         }
     }
 }
@@ -193,7 +196,7 @@ mod tests {
     fn greedy_sampling() {
         let params = SamplingParams {
             temperature: 0.0,
-            ..Default::default()
+            ..SamplingParams::default()
         };
         let mut sampler = Sampler::new(params, 42);
         let logits = vec![0.1, 0.5, 0.3, 0.9, 0.2];
@@ -226,11 +229,12 @@ mod tests {
             top_k: 5,
             top_p: 1.0, // disable top-p so we control exactly
             repetition_penalty: 1.0,
+            max_tokens: 128,
         };
         let mut sampler = Sampler::new(params, 99);
         let logits: Vec<f32> = (0..200).map(|i| i as f32 * 0.01).collect();
         for _ in 0..20 {
-            let token = sampler.sample(&logits).unwrap();
+            let token = sampler.sample(&logits).expect("sampling should succeed");
             // Top-k=5 on ascending logits: only the last 5 indices (195-199) are valid
             assert!(token >= 195, "expected token ≥ 195, got {token}");
         }

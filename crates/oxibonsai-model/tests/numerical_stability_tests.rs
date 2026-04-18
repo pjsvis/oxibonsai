@@ -478,19 +478,34 @@ fn transformer_block_extreme_embeddings_no_nan() {
     let up_blocks = make_blocks(inter * blocks_per_row, 0.01, 0xFF);
     let down_blocks = make_blocks(h * (inter / 128), 0.01, 0xFF);
 
+    let kernel_arc = std::sync::Arc::new(oxibonsai_kernels::KernelDispatcher::auto_detect());
     let block = TransformerBlock::new(
         0,
         RmsNorm::new(vec![1.0; h], 1e-6),
-        Linear1Bit::new(&q_blocks, nq * hd, h),
-        Linear1Bit::new(&k_blocks, nkv * hd, h),
-        Linear1Bit::new(&v_blocks, nkv * hd, h),
-        Linear1Bit::new(&o_blocks, h, nq * hd),
+        Linear1Bit::new(&q_blocks, nq * hd, h, kernel_arc.clone())
+            .expect("q")
+            .into(),
+        Linear1Bit::new(&k_blocks, nkv * hd, h, kernel_arc.clone())
+            .expect("k")
+            .into(),
+        Linear1Bit::new(&v_blocks, nkv * hd, h, kernel_arc.clone())
+            .expect("v")
+            .into(),
+        Linear1Bit::new(&o_blocks, h, nq * hd, kernel_arc.clone())
+            .expect("o")
+            .into(),
         RmsNorm::new(vec![1.0; hd], 1e-6),
         RmsNorm::new(vec![1.0; hd], 1e-6),
         RmsNorm::new(vec![1.0; h], 1e-6),
-        Linear1Bit::new(&gate_blocks, inter, h),
-        Linear1Bit::new(&up_blocks, inter, h),
-        Linear1Bit::new(&down_blocks, h, inter),
+        Linear1Bit::new(&gate_blocks, inter, h, kernel_arc.clone())
+            .expect("gate")
+            .into(),
+        Linear1Bit::new(&up_blocks, inter, h, kernel_arc.clone())
+            .expect("up")
+            .into(),
+        Linear1Bit::new(&down_blocks, h, inter, kernel_arc.clone())
+            .expect("down")
+            .into(),
         nq,
         nkv,
         hd,
@@ -498,13 +513,13 @@ fn transformer_block_extreme_embeddings_no_nan() {
     );
 
     let rope = RopeTable::new(hd, 16, 10000.0);
-    let kernel = oxibonsai_kernels::KernelDispatcher::auto_detect();
+    let kernel = &*kernel_arc;
     let mut kv_cache = KvCache::new(1, nkv, hd, 16);
 
     // Extreme input: large values
     let mut hidden = vec![100.0f32; h];
     block
-        .forward(&mut hidden, 0, &mut kv_cache, &rope, &kernel)
+        .forward(&mut hidden, 0, &mut kv_cache, &rope, kernel)
         .expect("forward should succeed with large input");
     assert_no_nan(&hidden, "block_extreme_large");
 }
@@ -526,19 +541,34 @@ fn transformer_block_seq_len_one() {
     let up_blocks = make_blocks(inter * blocks_per_row, 0.01, 0xFF);
     let down_blocks = make_blocks(h * (inter / 128), 0.01, 0xFF);
 
+    let kernel_arc = std::sync::Arc::new(oxibonsai_kernels::KernelDispatcher::auto_detect());
     let block = TransformerBlock::new(
         0,
         RmsNorm::new(vec![1.0; h], 1e-6),
-        Linear1Bit::new(&q_blocks, nq * hd, h),
-        Linear1Bit::new(&k_blocks, nkv * hd, h),
-        Linear1Bit::new(&v_blocks, nkv * hd, h),
-        Linear1Bit::new(&o_blocks, h, nq * hd),
+        Linear1Bit::new(&q_blocks, nq * hd, h, kernel_arc.clone())
+            .expect("q")
+            .into(),
+        Linear1Bit::new(&k_blocks, nkv * hd, h, kernel_arc.clone())
+            .expect("k")
+            .into(),
+        Linear1Bit::new(&v_blocks, nkv * hd, h, kernel_arc.clone())
+            .expect("v")
+            .into(),
+        Linear1Bit::new(&o_blocks, h, nq * hd, kernel_arc.clone())
+            .expect("o")
+            .into(),
         RmsNorm::new(vec![1.0; hd], 1e-6),
         RmsNorm::new(vec![1.0; hd], 1e-6),
         RmsNorm::new(vec![1.0; h], 1e-6),
-        Linear1Bit::new(&gate_blocks, inter, h),
-        Linear1Bit::new(&up_blocks, inter, h),
-        Linear1Bit::new(&down_blocks, h, inter),
+        Linear1Bit::new(&gate_blocks, inter, h, kernel_arc.clone())
+            .expect("gate")
+            .into(),
+        Linear1Bit::new(&up_blocks, inter, h, kernel_arc.clone())
+            .expect("up")
+            .into(),
+        Linear1Bit::new(&down_blocks, h, inter, kernel_arc.clone())
+            .expect("down")
+            .into(),
         nq,
         nkv,
         hd,
@@ -546,14 +576,14 @@ fn transformer_block_seq_len_one() {
     );
 
     let rope = RopeTable::new(hd, 16, 10000.0);
-    let kernel = oxibonsai_kernels::KernelDispatcher::auto_detect();
+    let kernel = &*kernel_arc;
     let mut kv_cache = KvCache::new(1, nkv, hd, 16);
 
     let mut hidden: Vec<f32> = (0..h).map(|i| (i as f32 + 1.0) * 0.01).collect();
 
     // Single token at position 0 (minimum sequence length)
     block
-        .forward(&mut hidden, 0, &mut kv_cache, &rope, &kernel)
+        .forward(&mut hidden, 0, &mut kv_cache, &rope, kernel)
         .expect("forward should succeed with seq_len=1");
 
     assert_no_nan(&hidden, "block_seq1");
@@ -577,19 +607,34 @@ fn transformer_block_multiple_positions() {
     let up_blocks = make_blocks(inter * blocks_per_row, 0.01, 0xFF);
     let down_blocks = make_blocks(h * (inter / 128), 0.01, 0xFF);
 
+    let kernel_arc = std::sync::Arc::new(oxibonsai_kernels::KernelDispatcher::auto_detect());
     let block = TransformerBlock::new(
         0,
         RmsNorm::new(vec![1.0; h], 1e-6),
-        Linear1Bit::new(&q_blocks, nq * hd, h),
-        Linear1Bit::new(&k_blocks, nkv * hd, h),
-        Linear1Bit::new(&v_blocks, nkv * hd, h),
-        Linear1Bit::new(&o_blocks, h, nq * hd),
+        Linear1Bit::new(&q_blocks, nq * hd, h, kernel_arc.clone())
+            .expect("q")
+            .into(),
+        Linear1Bit::new(&k_blocks, nkv * hd, h, kernel_arc.clone())
+            .expect("k")
+            .into(),
+        Linear1Bit::new(&v_blocks, nkv * hd, h, kernel_arc.clone())
+            .expect("v")
+            .into(),
+        Linear1Bit::new(&o_blocks, h, nq * hd, kernel_arc.clone())
+            .expect("o")
+            .into(),
         RmsNorm::new(vec![1.0; hd], 1e-6),
         RmsNorm::new(vec![1.0; hd], 1e-6),
         RmsNorm::new(vec![1.0; h], 1e-6),
-        Linear1Bit::new(&gate_blocks, inter, h),
-        Linear1Bit::new(&up_blocks, inter, h),
-        Linear1Bit::new(&down_blocks, h, inter),
+        Linear1Bit::new(&gate_blocks, inter, h, kernel_arc.clone())
+            .expect("gate")
+            .into(),
+        Linear1Bit::new(&up_blocks, inter, h, kernel_arc.clone())
+            .expect("up")
+            .into(),
+        Linear1Bit::new(&down_blocks, h, inter, kernel_arc.clone())
+            .expect("down")
+            .into(),
         nq,
         nkv,
         hd,
@@ -597,7 +642,7 @@ fn transformer_block_multiple_positions() {
     );
 
     let rope = RopeTable::new(hd, max_seq, 10000.0);
-    let kernel = oxibonsai_kernels::KernelDispatcher::auto_detect();
+    let kernel = &*kernel_arc;
     let mut kv_cache = KvCache::new(1, nkv, hd, max_seq);
 
     // Process multiple tokens sequentially (building up KV cache)
@@ -605,7 +650,7 @@ fn transformer_block_multiple_positions() {
     for pos in 0..max_seq {
         let mut hidden = random_tensor(&mut state, h);
         block
-            .forward(&mut hidden, pos, &mut kv_cache, &rope, &kernel)
+            .forward(&mut hidden, pos, &mut kv_cache, &rope, kernel)
             .unwrap_or_else(|_| panic!("forward should succeed at pos={pos}"));
         assert_no_nan(&hidden, &format!("block_pos{pos}"));
     }

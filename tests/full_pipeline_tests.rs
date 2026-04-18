@@ -28,6 +28,7 @@ fn make_greedy_params() -> SamplingParams {
         top_k: 0,
         top_p: 1.0,
         repetition_penalty: 1.0,
+        max_tokens: 128,
     }
 }
 
@@ -54,6 +55,7 @@ fn test_pipeline_builder_sampling_runs() {
             top_k: 0,
             top_p: 0.9,
             repetition_penalty: 1.0,
+            max_tokens: 128,
         },
         99,
     );

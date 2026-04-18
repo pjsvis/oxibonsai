@@ -13,6 +13,8 @@ use rayon::prelude::*;
 use crate::dispatch::KernelDispatcher;
 use crate::error::{KernelError, KernelResult};
 use crate::traits::OneBitKernel;
+use crate::traits::TernaryKernel;
+use oxibonsai_core::QK_TQ2_0_G128;
 
 /// Minimum number of rows before engaging parallel GEMV.
 /// Below this threshold, the overhead of thread spawning exceeds the benefit.
@@ -144,6 +146,133 @@ pub fn gemm_1bit_g128_par(
                 let input_row = &input[mi * k..(mi + 1) * k];
                 // Each batch element is a single-row GEMM (effectively GEMV across all weight rows)
                 dispatcher.gemm(blocks, input_row, out_row, 1, n_rows, k)
+            })?;
+
+        Ok(())
+    }
+}
+
+/// Parallel row-wise ternary GEMV.
+///
+/// Each row's dot product is independent, making this trivially parallelizable.
+/// Falls back to sequential for small `n_rows` to avoid overhead.
+pub fn gemv_ternary_g128_par(
+    dispatcher: &KernelDispatcher,
+    blocks: &[oxibonsai_core::BlockTQ2_0_g128],
+    input: &[f32],
+    output: &mut [f32],
+    n_rows: usize,
+    k: usize,
+) -> KernelResult<()> {
+    if k % QK_TQ2_0_G128 != 0 {
+        return Err(KernelError::NotBlockAligned {
+            count: k,
+            block_size: QK_TQ2_0_G128,
+        });
+    }
+    if input.len() < k {
+        return Err(KernelError::DimensionMismatch {
+            expected: k,
+            got: input.len(),
+        });
+    }
+    if output.len() < n_rows {
+        return Err(KernelError::BufferTooSmall {
+            needed: n_rows,
+            available: output.len(),
+        });
+    }
+
+    let blocks_per_row = k / QK_TQ2_0_G128;
+    let expected_blocks = n_rows * blocks_per_row;
+    if blocks.len() < expected_blocks {
+        return Err(KernelError::BufferTooSmall {
+            needed: expected_blocks,
+            available: blocks.len(),
+        });
+    }
+
+    if n_rows < PAR_GEMV_MIN_ROWS {
+        return dispatcher.gemv_ternary_g128(blocks, input, output, n_rows, k);
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    {
+        return dispatcher.gemv_ternary_g128(blocks, input, output, n_rows, k);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        output[..n_rows]
+            .par_chunks_mut(1)
+            .enumerate()
+            .try_for_each(|(row, out_chunk)| {
+                let row_blocks = &blocks[row * blocks_per_row..(row + 1) * blocks_per_row];
+                dispatcher.gemv_ternary_g128(row_blocks, input, out_chunk, 1, k)
+            })?;
+
+        Ok(())
+    }
+}
+
+/// Parallel batch-wise ternary GEMM.
+///
+/// Each batch element's row is independent, making this parallelizable
+/// along the M (batch/sequence) dimension.
+pub fn gemm_ternary_g128_par(
+    dispatcher: &KernelDispatcher,
+    blocks: &[oxibonsai_core::BlockTQ2_0_g128],
+    input: &[f32],
+    output: &mut [f32],
+    m: usize,
+    n_rows: usize,
+    k: usize,
+) -> KernelResult<()> {
+    if k % QK_TQ2_0_G128 != 0 {
+        return Err(KernelError::NotBlockAligned {
+            count: k,
+            block_size: QK_TQ2_0_G128,
+        });
+    }
+    if input.len() < m * k {
+        return Err(KernelError::DimensionMismatch {
+            expected: m * k,
+            got: input.len(),
+        });
+    }
+    if output.len() < m * n_rows {
+        return Err(KernelError::BufferTooSmall {
+            needed: m * n_rows,
+            available: output.len(),
+        });
+    }
+
+    let blocks_per_row = k / QK_TQ2_0_G128;
+    let expected_blocks = n_rows * blocks_per_row;
+    if blocks.len() < expected_blocks {
+        return Err(KernelError::BufferTooSmall {
+            needed: expected_blocks,
+            available: blocks.len(),
+        });
+    }
+
+    if m < PAR_GEMM_MIN_BATCH {
+        return dispatcher.gemm_ternary_g128(blocks, input, output, m, n_rows, k);
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    {
+        return dispatcher.gemm_ternary_g128(blocks, input, output, m, n_rows, k);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        output[..m * n_rows]
+            .par_chunks_mut(n_rows)
+            .enumerate()
+            .try_for_each(|(mi, out_row)| {
+                let input_row = &input[mi * k..(mi + 1) * k];
+                dispatcher.gemm_ternary_g128(blocks, input_row, out_row, 1, n_rows, k)
             })?;
 
         Ok(())
@@ -335,6 +464,10 @@ mod tests {
         (blocks, input)
     }
 
+    fn make_ternary_block(qs: [u8; 32]) -> oxibonsai_core::BlockTQ2_0_g128 {
+        oxibonsai_core::BlockTQ2_0_g128 { qs, d: f16::ONE }
+    }
+
     #[test]
     fn par_gemv_matches_sequential() {
         let n_rows = 128; // Above PAR_GEMV_MIN_ROWS threshold
@@ -420,6 +553,75 @@ mod tests {
                 out_par[i]
             );
         }
+    }
+
+    #[test]
+    fn par_ternary_gemv_matches_sequential() -> KernelResult<()> {
+        let n_rows = 128;
+        let k = 256;
+        let blocks_per_row = k / QK_TQ2_0_G128;
+        let blocks = vec![make_ternary_block([0xAAu8; 32]); n_rows * blocks_per_row];
+        let input: Vec<f32> = (0..k).map(|i| (i as f32 * 0.01) - 1.28).collect();
+        let dispatcher = KernelDispatcher::auto_detect();
+
+        let mut out_seq = vec![0.0f32; n_rows];
+        let mut out_par = vec![0.0f32; n_rows];
+
+        dispatcher.gemv_ternary_g128(&blocks, &input, &mut out_seq, n_rows, k)?;
+        gemv_ternary_g128_par(&dispatcher, &blocks, &input, &mut out_par, n_rows, k)?;
+
+        for i in 0..n_rows {
+            assert!(
+                (out_seq[i] - out_par[i]).abs() < 1e-4,
+                "row {i}: seq={}, par={}",
+                out_seq[i],
+                out_par[i]
+            );
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn par_ternary_gemv_small_is_sequential() -> KernelResult<()> {
+        let n_rows = 4;
+        let k = 128;
+        let blocks_per_row = k / QK_TQ2_0_G128;
+        let blocks = vec![make_ternary_block([0xAAu8; 32]); n_rows * blocks_per_row];
+        let input: Vec<f32> = (0..k).map(|i| (i as f32 * 0.01) - 1.28).collect();
+        let dispatcher = KernelDispatcher::auto_detect();
+
+        let mut output = vec![0.0f32; n_rows];
+        gemv_ternary_g128_par(&dispatcher, &blocks, &input, &mut output, n_rows, k)?;
+        Ok(())
+    }
+
+    #[test]
+    fn par_ternary_gemm_matches_sequential() -> KernelResult<()> {
+        let m = 8;
+        let n_rows = 16;
+        let k = 128;
+        let blocks_per_row = k / QK_TQ2_0_G128;
+        let blocks = vec![make_ternary_block([0xAAu8; 32]); n_rows * blocks_per_row];
+        let input: Vec<f32> = (0..m * k).map(|i| (i as f32 * 0.005) - 0.32).collect();
+        let dispatcher = KernelDispatcher::auto_detect();
+
+        let mut out_seq = vec![0.0f32; m * n_rows];
+        let mut out_par = vec![0.0f32; m * n_rows];
+
+        dispatcher.gemm_ternary_g128(&blocks, &input, &mut out_seq, m, n_rows, k)?;
+        gemm_ternary_g128_par(&dispatcher, &blocks, &input, &mut out_par, m, n_rows, k)?;
+
+        for i in 0..(m * n_rows) {
+            assert!(
+                (out_seq[i] - out_par[i]).abs() < 1e-4,
+                "idx {i}: seq={}, par={}",
+                out_seq[i],
+                out_par[i]
+            );
+        }
+
+        Ok(())
     }
 
     // ── LayerParallelConfig tests ──

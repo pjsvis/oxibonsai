@@ -1,11 +1,14 @@
 # oxibonsai-kernels TODO
 
-> 1-bit quantized compute kernels with SIMD dispatch and parallelism
-> 16 files, ~4,300 lines, 243 tests
+> 1-bit + ternary quantized compute kernels with SIMD dispatch, parallelism, and GPU backends
+> Version 0.1.1 — 273 tests passing
+> Last updated: 2026-04-18
 
-## Status: ✅ All Features Complete
+## Status: Stable (mature, complete)
 
-NEON, AVX-512, tiled GEMM, packing, property tests, cross-tier correctness, performance tuning, cache-line alignment, and prefetch hints all implemented.
+NEON, AVX-512, tiled GEMM, packing, property tests, cross-tier correctness,
+performance tuning, cache-line alignment, prefetch hints, SIMD ternary,
+fused Metal TQ2 full-forward, and native CUDA NVRTC paths all shipped.
 
 ## Done
 
@@ -29,3 +32,18 @@ NEON, AVX-512, tiled GEMM, packing, property tests, cross-tier correctness, perf
 - [x] **Parallel GEMV tuning** — `tuning.rs` with PlatformProfile, TunedThresholds, auto-detection of optimal thresholds per platform
 - [x] **Cache-line alignment** — `aligned.rs` with AlignedBuffer/AlignedBlocks, 64-byte aligned allocations for SIMD loads
 - [x] **Prefetch hints** — `prefetch.rs` with PrefetchConfig, software prefetch via x86 _mm_prefetch / ARM _prefetch, platform-specific dispatch
+
+## Ternary Bonsai
+
+- [x] Scalar ternary kernels: `dequant_ternary.rs`, `gemv_ternary.rs`, `gemm_ternary.rs`
+- [x] **Phase 10 — SIMD ternary kernels (NEON / AVX2 / AVX-512)**: `gemv_tq2_0_g128_*`, `dequant_tq2_0_g128_*`, `gemm_tq2_0_g128_*`
+- [x] `TernaryKernel` trait in `traits.rs` + `impl TernaryKernel for KernelDispatcher` in `dispatch.rs`
+
+## GPU Backends
+
+- [x] `GpuBackendTrait` abstraction + `CpuBackend` baseline
+- [x] `scirs2_backend::Scirs2Backend` — portable CUDA/Metal via scirs2-core
+- [x] **Phase 11 — Metal TQ2 GEMV** fused kernels (`metal_graph.rs`, `metal_prefill.rs`)
+- [x] **Phase 12 — Native CUDA NVRTC backend** (`cuda_full_layer.rs`, `cuda_graph/`, `cuda_kernels.rs`, `cuda_prefill*.rs`, `cuda_attn_kernels.rs`) with CUDA Graph execution
+- [x] **Phase 13.x — Fused Metal TQ2 full-forward** (`metal_full_layer/`) — single command buffer, ~50 tok/s on 1.7B ternary (~13× speedup)
+- [x] Runtime NVRTC kernel sources (`kernel_sources/`: attention, decode, decode_ternary, prefill, utility, archive)

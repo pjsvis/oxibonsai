@@ -14,7 +14,7 @@ use crate::dequant;
 use crate::error::KernelResult;
 use crate::gemm;
 use crate::gemv;
-use crate::traits::OneBitKernel;
+use crate::traits::{OneBitKernel, TernaryKernel};
 use crate::weight_cache::GpuWeightHandle;
 use oxibonsai_core::tensor::BlockQ1_0G128;
 #[cfg(feature = "gpu")]
@@ -65,6 +65,15 @@ pub struct KernelDispatcher {
     /// hardware-accelerated backend was detected at construction time.
     #[cfg(feature = "gpu")]
     gpu_backend: Option<Arc<dyn crate::gpu_backend::GpuBackendTrait>>,
+}
+
+impl std::fmt::Debug for KernelDispatcher {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // GPU backend is a trait object without Debug; show only the tier.
+        f.debug_struct("KernelDispatcher")
+            .field("tier", &self.tier)
+            .finish_non_exhaustive()
+    }
 }
 
 impl KernelDispatcher {
@@ -191,15 +200,15 @@ impl KernelDispatcher {
             KernelTier::Reference => gemv::gemv_1bit_g128(blocks, input, output, n_rows, k),
             #[cfg(target_arch = "x86_64")]
             KernelTier::Avx2 => unsafe {
-                crate::simd_avx2::gemv_1bit_g128_avx2(blocks, input, output, n_rows, k)
+                crate::simd_avx2::gemv_1bit_g128_avx2_prefetch(blocks, input, output, n_rows, k)
             },
             #[cfg(target_arch = "x86_64")]
             KernelTier::Avx512 => unsafe {
-                crate::simd_avx512::gemv_1bit_g128_avx512(blocks, input, output, n_rows, k)
+                crate::simd_avx512::gemv_1bit_g128_avx512_prefetch(blocks, input, output, n_rows, k)
             },
             #[cfg(target_arch = "aarch64")]
             KernelTier::Neon => unsafe {
-                crate::simd_neon::gemv_1bit_g128_neon(blocks, input, output, n_rows, k)
+                crate::simd_neon::gemv_1bit_g128_neon_prefetch(blocks, input, output, n_rows, k)
             },
             #[cfg(feature = "gpu")]
             KernelTier::Gpu => gemv::gemv_1bit_g128(blocks, input, output, n_rows, k),
@@ -220,18 +229,111 @@ impl KernelDispatcher {
             KernelTier::Reference => gemm::gemm_1bit_g128(blocks, input, output, m, n_rows, k),
             #[cfg(target_arch = "x86_64")]
             KernelTier::Avx2 => unsafe {
-                crate::simd_avx2::gemm_1bit_g128_avx2(blocks, input, output, m, n_rows, k)
+                crate::simd_avx2::gemm_1bit_g128_avx2_prefetch(blocks, input, output, m, n_rows, k)
             },
+            // No prefetch variant for AVX-512 GEMM — keep non-prefetch.
             #[cfg(target_arch = "x86_64")]
             KernelTier::Avx512 => unsafe {
                 crate::simd_avx512::gemm_1bit_g128_avx512(blocks, input, output, m, n_rows, k)
             },
             #[cfg(target_arch = "aarch64")]
             KernelTier::Neon => unsafe {
-                crate::simd_neon::gemm_1bit_g128_neon(blocks, input, output, m, n_rows, k)
+                crate::simd_neon::gemm_1bit_g128_neon_prefetch(blocks, input, output, m, n_rows, k)
             },
             #[cfg(feature = "gpu")]
             KernelTier::Gpu => gemm::gemm_1bit_g128(blocks, input, output, m, n_rows, k),
+        }
+    }
+
+    /// Dispatch a `dequant_ternary` call using the best *CPU* tier.
+    #[cfg(feature = "gpu")]
+    fn cpu_dequant_ternary(
+        blocks: &[oxibonsai_core::BlockTQ2_0_g128],
+        output: &mut [f32],
+    ) -> KernelResult<()> {
+        match Self::cpu_tier() {
+            KernelTier::Reference => crate::dequant_ternary::dequant_tq2_0_g128(blocks, output),
+            #[cfg(target_arch = "x86_64")]
+            KernelTier::Avx2 => unsafe {
+                crate::simd_avx2::dequant_tq2_0_g128_avx2(blocks, output)
+            },
+            #[cfg(target_arch = "x86_64")]
+            KernelTier::Avx512 => unsafe {
+                crate::simd_avx512::dequant_tq2_0_g128_avx512(blocks, output)
+            },
+            #[cfg(target_arch = "aarch64")]
+            KernelTier::Neon => unsafe {
+                crate::simd_neon::dequant_tq2_0_g128_neon(blocks, output)
+            },
+            #[cfg(feature = "gpu")]
+            KernelTier::Gpu => crate::dequant_ternary::dequant_tq2_0_g128(blocks, output),
+        }
+    }
+
+    /// Dispatch a `gemv_ternary` call using the best *CPU* tier.
+    #[cfg(feature = "gpu")]
+    fn cpu_gemv_ternary(
+        blocks: &[oxibonsai_core::BlockTQ2_0_g128],
+        input: &[f32],
+        output: &mut [f32],
+        n_rows: usize,
+        k: usize,
+    ) -> KernelResult<()> {
+        match Self::cpu_tier() {
+            KernelTier::Reference => {
+                crate::gemv_ternary::gemv_tq2_0_g128(blocks, input, output, n_rows, k)
+            }
+            #[cfg(target_arch = "x86_64")]
+            KernelTier::Avx2 => unsafe {
+                crate::simd_avx2::gemv_tq2_0_g128_avx2_prefetch(blocks, input, output, n_rows, k)
+            },
+            #[cfg(target_arch = "x86_64")]
+            KernelTier::Avx512 => unsafe {
+                crate::simd_avx512::gemv_tq2_0_g128_avx512_prefetch(
+                    blocks, input, output, n_rows, k,
+                )
+            },
+            #[cfg(target_arch = "aarch64")]
+            KernelTier::Neon => unsafe {
+                crate::simd_neon::gemv_tq2_0_g128_neon_prefetch(blocks, input, output, n_rows, k)
+            },
+            #[cfg(feature = "gpu")]
+            KernelTier::Gpu => {
+                crate::gemv_ternary::gemv_tq2_0_g128(blocks, input, output, n_rows, k)
+            }
+        }
+    }
+
+    /// Dispatch a `gemm_ternary` call using the best *CPU* tier.
+    #[cfg(feature = "gpu")]
+    fn cpu_gemm_ternary(
+        blocks: &[oxibonsai_core::BlockTQ2_0_g128],
+        input: &[f32],
+        output: &mut [f32],
+        m: usize,
+        n_rows: usize,
+        k: usize,
+    ) -> KernelResult<()> {
+        match Self::cpu_tier() {
+            KernelTier::Reference => {
+                crate::gemm_ternary::gemm_tq2_0_g128(blocks, input, output, m, n_rows, k)
+            }
+            #[cfg(target_arch = "x86_64")]
+            KernelTier::Avx2 => unsafe {
+                crate::simd_avx2::gemm_tq2_0_g128_avx2(blocks, input, output, m, n_rows, k)
+            },
+            #[cfg(target_arch = "x86_64")]
+            KernelTier::Avx512 => unsafe {
+                crate::simd_avx512::gemm_tq2_0_g128_avx512(blocks, input, output, m, n_rows, k)
+            },
+            #[cfg(target_arch = "aarch64")]
+            KernelTier::Neon => unsafe {
+                crate::simd_neon::gemm_tq2_0_g128_neon(blocks, input, output, m, n_rows, k)
+            },
+            #[cfg(feature = "gpu")]
+            KernelTier::Gpu => {
+                crate::gemm_ternary::gemm_tq2_0_g128(blocks, input, output, m, n_rows, k)
+            }
         }
     }
 
@@ -279,15 +381,15 @@ impl OneBitKernel for KernelDispatcher {
             KernelTier::Reference => gemv::gemv_1bit_g128(blocks, input, output, n_rows, k),
             #[cfg(target_arch = "x86_64")]
             KernelTier::Avx2 => unsafe {
-                crate::simd_avx2::gemv_1bit_g128_avx2(blocks, input, output, n_rows, k)
+                crate::simd_avx2::gemv_1bit_g128_avx2_prefetch(blocks, input, output, n_rows, k)
             },
             #[cfg(target_arch = "x86_64")]
             KernelTier::Avx512 => unsafe {
-                crate::simd_avx512::gemv_1bit_g128_avx512(blocks, input, output, n_rows, k)
+                crate::simd_avx512::gemv_1bit_g128_avx512_prefetch(blocks, input, output, n_rows, k)
             },
             #[cfg(target_arch = "aarch64")]
             KernelTier::Neon => unsafe {
-                crate::simd_neon::gemv_1bit_g128_neon(blocks, input, output, n_rows, k)
+                crate::simd_neon::gemv_1bit_g128_neon_prefetch(blocks, input, output, n_rows, k)
             },
             #[cfg(feature = "gpu")]
             KernelTier::Gpu => {
@@ -326,15 +428,16 @@ impl OneBitKernel for KernelDispatcher {
             KernelTier::Reference => gemm::gemm_1bit_g128(blocks, input, output, m, n_rows, k),
             #[cfg(target_arch = "x86_64")]
             KernelTier::Avx2 => unsafe {
-                crate::simd_avx2::gemm_1bit_g128_avx2(blocks, input, output, m, n_rows, k)
+                crate::simd_avx2::gemm_1bit_g128_avx2_prefetch(blocks, input, output, m, n_rows, k)
             },
+            // No prefetch variant for AVX-512 GEMM — keep non-prefetch.
             #[cfg(target_arch = "x86_64")]
             KernelTier::Avx512 => unsafe {
                 crate::simd_avx512::gemm_1bit_g128_avx512(blocks, input, output, m, n_rows, k)
             },
             #[cfg(target_arch = "aarch64")]
             KernelTier::Neon => unsafe {
-                crate::simd_neon::gemm_1bit_g128_neon(blocks, input, output, m, n_rows, k)
+                crate::simd_neon::gemm_1bit_g128_neon_prefetch(blocks, input, output, m, n_rows, k)
             },
             #[cfg(feature = "gpu")]
             KernelTier::Gpu => {
@@ -492,6 +595,159 @@ impl OneBitKernel for KernelDispatcher {
     }
 }
 
+impl TernaryKernel for KernelDispatcher {
+    fn dequant_ternary_g128(
+        &self,
+        blocks: &[oxibonsai_core::BlockTQ2_0_g128],
+        output: &mut [f32],
+    ) -> KernelResult<()> {
+        match self.tier {
+            KernelTier::Reference => crate::dequant_ternary::dequant_tq2_0_g128(blocks, output),
+            #[cfg(target_arch = "x86_64")]
+            KernelTier::Avx2 => unsafe {
+                crate::simd_avx2::dequant_tq2_0_g128_avx2(blocks, output)
+            },
+            #[cfg(target_arch = "x86_64")]
+            KernelTier::Avx512 => unsafe {
+                crate::simd_avx512::dequant_tq2_0_g128_avx512(blocks, output)
+            },
+            #[cfg(target_arch = "aarch64")]
+            KernelTier::Neon => unsafe {
+                crate::simd_neon::dequant_tq2_0_g128_neon(blocks, output)
+            },
+            // No ternary GPU kernels — fall back to best CPU SIMD tier.
+            #[cfg(feature = "gpu")]
+            KernelTier::Gpu => Self::cpu_dequant_ternary(blocks, output),
+        }
+    }
+
+    fn gemv_ternary_g128(
+        &self,
+        blocks: &[oxibonsai_core::BlockTQ2_0_g128],
+        input: &[f32],
+        output: &mut [f32],
+        n_rows: usize,
+        k: usize,
+    ) -> KernelResult<()> {
+        match self.tier {
+            KernelTier::Reference => {
+                crate::gemv_ternary::gemv_tq2_0_g128(blocks, input, output, n_rows, k)
+            }
+            #[cfg(target_arch = "x86_64")]
+            KernelTier::Avx2 => unsafe {
+                crate::simd_avx2::gemv_tq2_0_g128_avx2_prefetch(blocks, input, output, n_rows, k)
+            },
+            #[cfg(target_arch = "x86_64")]
+            KernelTier::Avx512 => unsafe {
+                crate::simd_avx512::gemv_tq2_0_g128_avx512_prefetch(
+                    blocks, input, output, n_rows, k,
+                )
+            },
+            #[cfg(target_arch = "aarch64")]
+            KernelTier::Neon => unsafe {
+                crate::simd_neon::gemv_tq2_0_g128_neon_prefetch(blocks, input, output, n_rows, k)
+            },
+            // No ternary GPU kernels — fall back to best CPU SIMD tier.
+            #[cfg(feature = "gpu")]
+            KernelTier::Gpu => Self::cpu_gemv_ternary(blocks, input, output, n_rows, k),
+        }
+    }
+
+    fn gemm_ternary_g128(
+        &self,
+        blocks: &[oxibonsai_core::BlockTQ2_0_g128],
+        input: &[f32],
+        output: &mut [f32],
+        m: usize,
+        n_rows: usize,
+        k: usize,
+    ) -> KernelResult<()> {
+        match self.tier {
+            KernelTier::Reference => {
+                crate::gemm_ternary::gemm_tq2_0_g128(blocks, input, output, m, n_rows, k)
+            }
+            #[cfg(target_arch = "x86_64")]
+            KernelTier::Avx2 => unsafe {
+                crate::simd_avx2::gemm_tq2_0_g128_avx2(blocks, input, output, m, n_rows, k)
+            },
+            #[cfg(target_arch = "x86_64")]
+            KernelTier::Avx512 => unsafe {
+                crate::simd_avx512::gemm_tq2_0_g128_avx512(blocks, input, output, m, n_rows, k)
+            },
+            #[cfg(target_arch = "aarch64")]
+            KernelTier::Neon => unsafe {
+                crate::simd_neon::gemm_tq2_0_g128_neon(blocks, input, output, m, n_rows, k)
+            },
+            // No ternary GPU kernels — fall back to best CPU SIMD tier.
+            #[cfg(feature = "gpu")]
+            KernelTier::Gpu => Self::cpu_gemm_ternary(blocks, input, output, m, n_rows, k),
+        }
+    }
+
+    fn upload_weights_ternary(
+        &self,
+        blocks: &[oxibonsai_core::BlockTQ2_0_g128],
+    ) -> Option<GpuWeightHandle> {
+        #[cfg(feature = "gpu")]
+        {
+            if let (KernelTier::Gpu, Some(ref backend)) = (self.tier, &self.gpu_backend) {
+                match backend.upload_weights_ternary(blocks) {
+                    Ok(handle) => return Some(handle),
+                    Err(e) => {
+                        // Some backends (e.g. NativeCudaBackend without a TQ2 kernel)
+                        // legitimately don't support ternary uploads. We get called
+                        // once per ternary weight tensor at model load — log just
+                        // once to avoid hundreds of identical warnings.
+                        use std::sync::atomic::{AtomicBool, Ordering};
+                        static WARNED: AtomicBool = AtomicBool::new(false);
+                        if !WARNED.swap(true, Ordering::Relaxed) {
+                            tracing::warn!(
+                                error = %e,
+                                backend = backend.name(),
+                                "ternary weight GPU upload not supported by backend; \
+                                 falling back to CPU SIMD for ternary GEMV (this message \
+                                 is shown once per process)"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        let _ = blocks;
+        None
+    }
+
+    fn gemv_ternary_g128_cached(
+        &self,
+        handle: GpuWeightHandle,
+        input: &[f32],
+        output: &mut [f32],
+        n_rows: usize,
+        k: usize,
+    ) -> KernelResult<()> {
+        #[cfg(feature = "gpu")]
+        {
+            if let (KernelTier::Gpu, Some(ref backend)) = (self.tier, &self.gpu_backend) {
+                match backend.gemv_tq2_g128_cached(handle, input, n_rows, k) {
+                    Ok(result) => {
+                        let len = output.len().min(result.len());
+                        output[..len].copy_from_slice(&result[..len]);
+                        return Ok(());
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "cached GPU ternary gemv failed, cannot fallback without blocks");
+                        return Err(crate::error::KernelError::GpuError(e.to_string()));
+                    }
+                }
+            }
+        }
+        let _ = (handle, input, output, n_rows, k);
+        Err(crate::error::KernelError::UnsupportedOperation(
+            "gemv_ternary_g128_cached requires GPU tier".into(),
+        ))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -528,5 +784,82 @@ mod tests {
         let dispatcher = KernelDispatcher::with_tier(KernelTier::Neon);
         assert_eq!(dispatcher.tier(), KernelTier::Neon);
         assert_eq!(dispatcher.name(), "Q1_0_g128 NEON (128-bit)");
+    }
+
+    #[test]
+    fn dispatcher_exposes_ternary_gemv() {
+        use crate::TernaryKernel;
+        use half::f16;
+        use oxibonsai_core::BlockTQ2_0_g128;
+
+        let dispatcher = KernelDispatcher::auto_detect();
+
+        // row 0: all +1 (qs=0xAA = 0b10101010 → four 0b10 codes per byte → +1)
+        // row 1: all -1 (qs=0x00 = 0b00000000 → four 0b00 codes per byte → -1)
+        let block_pos = BlockTQ2_0_g128 {
+            qs: [0xAA; 32],
+            d: f16::from_f32(1.0),
+        };
+        let block_neg = BlockTQ2_0_g128 {
+            qs: [0x00; 32],
+            d: f16::from_f32(1.0),
+        };
+        let blocks = vec![block_pos, block_neg];
+        let input = vec![1.0f32; 128];
+        let mut output = vec![0.0f32; 2];
+
+        dispatcher
+            .gemv_ternary_g128(&blocks, &input, &mut output, 2, 128)
+            .expect("gemv_ternary_g128 should succeed");
+        assert!(
+            (output[0] - 128.0).abs() < 1.0,
+            "row0 expected ~128.0, got {}",
+            output[0]
+        );
+        assert!(
+            (output[1] + 128.0).abs() < 1.0,
+            "row1 expected ~-128.0, got {}",
+            output[1]
+        );
+    }
+
+    #[test]
+    fn dispatcher_ternary_reference_tier() {
+        use crate::TernaryKernel;
+        use half::f16;
+        use oxibonsai_core::BlockTQ2_0_g128;
+
+        let dispatcher = KernelDispatcher::with_tier(KernelTier::Reference);
+        let blocks = vec![BlockTQ2_0_g128 {
+            qs: [0xAA; 32],
+            d: f16::from_f32(1.0),
+        }];
+        let input = vec![1.0f32; 128];
+        let mut output = vec![0.0f32; 1];
+
+        dispatcher
+            .gemv_ternary_g128(&blocks, &input, &mut output, 1, 128)
+            .expect("gemv_ternary_g128 should succeed");
+        assert!((output[0] - 128.0).abs() < 1.0);
+    }
+
+    #[test]
+    fn ternary_upload_non_gpu_returns_none() {
+        use crate::TernaryKernel;
+        use half::f16;
+        use oxibonsai_core::BlockTQ2_0_g128;
+
+        // Reference tier has no GPU — upload_weights_ternary must return None.
+        let dispatcher = KernelDispatcher::with_tier(KernelTier::Reference);
+        let block = BlockTQ2_0_g128 {
+            qs: [0xAAu8; 32],
+            d: f16::from_f32(1.0),
+        };
+        let handle = dispatcher.upload_weights_ternary(&[block]);
+        assert!(
+            handle.is_none(),
+            "expected None for non-GPU tier, got {:?}",
+            handle
+        );
     }
 }

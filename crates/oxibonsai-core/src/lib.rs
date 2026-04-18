@@ -26,6 +26,7 @@
 //! |--------|---------|
 //! | [`config`] | `Qwen3Config` with named constructors for each variant |
 //! | [`gguf`] | Low-level GGUF v3 reader (header, metadata, tensors) |
+//! | [`quant_ternary`] | `BlockTQ2_0_g128`, `BlockTQ2_0`, `TernaryCode` — ternary block types |
 //! | [`tensor`] | `BlockQ1_0G128` and `OneBitTensor` types |
 //! | [`error`] | `BonsaiError` / `BonsaiResult` |
 
@@ -33,6 +34,7 @@ pub mod config;
 pub mod error;
 pub mod gguf;
 pub mod quant_k;
+pub mod quant_ternary;
 pub mod tensor;
 
 pub use config::Qwen3Config;
@@ -53,4 +55,8 @@ pub use gguf::types::{GgufTensorType, GgufValueType};
 pub use gguf::writer::MetadataWriteValue;
 pub use gguf::writer::{GgufWriter, TensorEntry, TensorType, WriteError};
 pub use quant_k::{BlockQ2K, BlockQ4K};
+pub use quant_ternary::{
+    BlockTQ2_0, BlockTQ2_0_g128, TernaryCode, BLOCK_TQ2_0_BYTES, BLOCK_TQ2_0_G128_BYTES, QK_TQ2_0,
+    QK_TQ2_0_G128,
+};
 pub use tensor::{BlockQ1_0G128, OneBitTensor};

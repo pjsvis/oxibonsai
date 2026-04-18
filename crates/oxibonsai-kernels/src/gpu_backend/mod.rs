@@ -78,8 +78,8 @@ pub use metal_graph::{
 #[cfg(all(feature = "metal", target_os = "macos"))]
 pub use metal_full_layer::{
     build_cached_weights, print_gpu_profile_summary, try_metal_full_forward,
-    try_metal_full_forward_cached, try_metal_full_layer, CachedLayerWeights, CachedModelWeights,
-    FullForwardLayerParams,
+    try_metal_full_forward_cached, try_metal_full_forward_ternary, try_metal_full_layer,
+    CachedLayerWeights, CachedModelWeights, FullForwardLayerParams, FullForwardLayerParamsTernary,
 };
 
 #[cfg(all(feature = "metal", target_os = "macos"))]
@@ -361,6 +361,33 @@ pub trait GpuBackendTrait: Send + Sync {
     ) -> Result<Vec<f32>, GpuError> {
         Err(GpuError::NotAvailable(
             "cached GEMV not supported by this backend".into(),
+        ))
+    }
+
+    /// Upload TQ2_0_g128 weight blocks to GPU memory in SoA layout.
+    ///
+    /// Default: not supported (returns `NotAvailable`).
+    fn upload_weights_ternary(
+        &self,
+        _blocks: &[oxibonsai_core::BlockTQ2_0_g128],
+    ) -> Result<crate::weight_cache::GpuWeightHandle, GpuError> {
+        Err(GpuError::NotAvailable(
+            "ternary weight upload not supported by this backend".into(),
+        ))
+    }
+
+    /// TQ2_0_g128 GEMV using a pre-uploaded GPU-resident weight buffer.
+    ///
+    /// Default: not supported (returns `NotAvailable`).
+    fn gemv_tq2_g128_cached(
+        &self,
+        _handle: crate::weight_cache::GpuWeightHandle,
+        _input: &[f32],
+        _n_rows: usize,
+        _k: usize,
+    ) -> Result<Vec<f32>, GpuError> {
+        Err(GpuError::NotAvailable(
+            "cached ternary GEMV not supported by this backend".into(),
         ))
     }
 
@@ -831,6 +858,23 @@ impl GpuBackendTrait for Scirs2BackendHandle {
         self.0.gemv_q1_g128_cached(handle, input, n_rows, k)
     }
 
+    fn upload_weights_ternary(
+        &self,
+        blocks: &[oxibonsai_core::BlockTQ2_0_g128],
+    ) -> Result<crate::weight_cache::GpuWeightHandle, GpuError> {
+        self.0.upload_weights_ternary(blocks)
+    }
+
+    fn gemv_tq2_g128_cached(
+        &self,
+        handle: crate::weight_cache::GpuWeightHandle,
+        input: &[f32],
+        n_rows: usize,
+        k: usize,
+    ) -> Result<Vec<f32>, GpuError> {
+        self.0.gemv_tq2_g128_cached(handle, input, n_rows, k)
+    }
+
     fn batch_attn_phase(
         &self,
         hidden: &[f32],
@@ -903,22 +947,41 @@ impl GpuBackendTrait for Scirs2BackendHandle {
 /// If initialisation fails at any level the function falls through to the
 /// next option, ultimately always returning a functional `CpuBackend`.
 pub fn select_backend() -> Box<dyn GpuBackendTrait> {
+    // `select_backend` may be called several times in a process (model load,
+    // engine init, tests). The "scirs2 not accelerated" / "init failed" warnings
+    // are properties of the host environment, not of any individual call site,
+    // so emit each variant at most once per process.
+    #[cfg(feature = "gpu")]
+    use std::sync::atomic::{AtomicBool, Ordering};
+    #[cfg(feature = "gpu")]
+    fn warn_once(flag: &AtomicBool, msg: impl FnOnce()) {
+        if !flag.swap(true, Ordering::Relaxed) {
+            msg();
+        }
+    }
+
     // ── 1. Try scirs2-core GPU backend (Metal on macOS) ─────────────────
     #[cfg(feature = "gpu")]
     {
+        static SCIRS2_NOT_ACCEL: AtomicBool = AtomicBool::new(false);
+        static SCIRS2_INIT_FAIL: AtomicBool = AtomicBool::new(false);
         match Scirs2Backend::global() {
             Ok(b) => {
                 if b.is_accelerated() {
                     return Box::new(Scirs2BackendHandle(b));
                 }
                 // scirs2-core returned a CPU context; skip and try stubs.
-                warn!(
-                    "select_backend: Scirs2Backend is not accelerated (backend={}), trying next",
-                    b.backend_name()
-                );
+                warn_once(&SCIRS2_NOT_ACCEL, || {
+                    warn!(
+                        "select_backend: Scirs2Backend is not accelerated (backend={}), trying next",
+                        b.backend_name()
+                    );
+                });
             }
             Err(e) => {
-                warn!("select_backend: Scirs2Backend init failed ({e}), trying next");
+                warn_once(&SCIRS2_INIT_FAIL, || {
+                    warn!("select_backend: Scirs2Backend init failed ({e}), trying next");
+                });
             }
         }
     }
@@ -1195,9 +1258,7 @@ mod tests {
         block[0] = scale_bytes[0];
         block[1] = scale_bytes[1];
         // Set all 128 bits to 1 → all weights = +scale = +1
-        for b in 2..18 {
-            block[b] = 0xFF;
-        }
+        block[2..18].fill(0xFF);
 
         let input: Vec<f32> = (0..128).map(|i| i as f32).collect();
         let expected: f32 = input.iter().sum(); // sum(0..128) = 8128
@@ -1249,9 +1310,7 @@ mod tests {
         let mut block = vec![0u8; 18];
         block[0] = scale_bytes[0];
         block[1] = scale_bytes[1];
-        for b in 2..18 {
-            block[b] = 0xFF;
-        }
+        block[2..18].fill(0xFF);
 
         let input: Vec<f32> = vec![1.0_f32; 128];
         let result = gpu_gemv_1bit(&block, &input, 1, 128).expect("gpu_gemv_1bit");

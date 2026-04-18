@@ -1,7 +1,7 @@
 # OxiBonsai TODO
 
 > Pure Rust 1-bit LLM inference engine for PrismML Bonsai models
-> 295 source files, ~92,305 lines of Rust code, 1,298+ tests across workspace — verified 2026-04-13
+> 346 source files, ~99,586 lines of Rust code, 2,935 tests passing across workspace — verified 2026-04-18
 
 ## Phase Status
 
@@ -16,6 +16,11 @@
 | Phase 6: Advanced Infrastructure | ✅ Complete | Multi-GPU, CUDA/Metal stubs, PagedAttention, GGUF v3, dynamic quant, profiler |
 | Phase 7: Production Features | ✅ Complete | Model merging, checkpointing, flash decoding, attention sink, compression, ROUGE, MoD, adaptive sampling, oxibonsai-serve |
 | Phase 8: Final Polish | ✅ Complete | K-quant formats, streaming GGUF, kernel tuning, comprehensive testing |
+| Phase 9: Ternary Bonsai | ✅ Complete | TQ2_0_g128 block type, SIMD kernels, model variants, GGUF surface, export |
+| Phase 10: Ternary CPU SIMD tiers | ✅ Complete | AVX2 / AVX-512 / NEON TQ2 GEMV with pos_mask+neg_mask decomposition |
+| Phase 11: Metal TQ2 GEMV + dispatch | ✅ Complete | Per-kernel Metal TQ2_0_g128 dispatch in `gpu_backend/metal_*` |
+| Phase 12: Native CUDA backend | ✅ Complete | NVRTC kernels, fused Q1 + TQ2 full-forward; ~21.9 tok/s on Ternary-Bonsai-1.7B |
+| Phase 13.x: Fused Metal TQ2 full-forward | ✅ Complete | Single command buffer per token, ~13× speedup; ~50 tok/s on Ternary-Bonsai-1.7B |
 
 ## Phase 4 — Complete
 
@@ -148,6 +153,55 @@
 - [x] **Full generate() pipeline integration tests** — End-to-end generation, determinism, sampling parameter effects, edge cases; 26 tests
 - [x] **Sampling distribution statistical tests** — Chi-square goodness-of-fit, temperature/top-k/top-p/repetition penalty validation; 22 tests
 
+## Phase 9 — Ternary Bonsai
+
+- [x] **Quant block types** — `crates/oxibonsai-core/src/quant_ternary.rs`: `BlockTQ2_0_g128` (34B/128w), `BlockTQ2_0` (66B/256w), `TernaryCode`, scalar dequant/quantize, zero-copy `slice_from_bytes`, 11 tests
+- [x] **GGUF surface** — `GgufTensorType::TQ2_0=37/TQ2_0_g128=42`, `writer::TensorType`, `KNOWN_QUANT_TYPES`, `compute_tensor_size_bytes`, `is_ternary()` helper, ID verification against ggml-quants.h, 6 tests
+- [x] **Core re-exports** — `pub mod quant_ternary` + re-export `BlockTQ2_0{_g128}`, `TernaryCode`, constants from `oxibonsai_core`
+- [x] **Scalar ternary kernels** — `dequant_ternary.rs`, `gemv_ternary.rs`, `gemm_ternary.rs` correctness reference; 9 tests per file
+- [x] **SIMD ternary kernels** — NEON / AVX2 / AVX-512 `gemv_tq2_0_g128` + `dequant` + `gemm`; pos_mask+neg_mask decomposition; sign-canary tests
+- [x] **`TernaryKernel` trait + dispatcher** — `traits.rs` + `dispatch.rs` impl; GPU tier falls back to scalar; 2 dispatcher tests
+- [x] **`Qwen3Config::ternary_bonsai_*()` constructors** — three named constructors in `config.rs`, co-drift via 1-bit ctor call; 2 tests
+- [x] **`ModelVariant::TernaryBonsai*` + detection** — three enum variants + `from_config_and_sample_tensor_type()`; all-ternary byte budget; 4 tests
+- [x] **`ternary_bonsai_*_spec()` + capability profiles** — six-entry `all_specs()`, ±5 % byte budget tests; 4 tests
+- [x] **`weight_loaders.rs` + `LinearTernary` layer** — `load_ternary_blocks`, `load_ternary_embedding`, `OutputWeight::Ternary`; sum-type for Attn/MLP; 3 tests
+- [x] **`ExportFormat::TernaryG128`** — `quantize_ternary.rs`, norm-only FP32 exceptions, `default_fp32_exceptions_ternary_excludes_embedding` guard; 5 tests
+- [x] **Phase 9 docs** — TODO.md Phase Status table + Memory/Performance rows + crate-local entries; README.md Ternary Bonsai subsection
+
+## Phase 10 — Complete
+
+- [x] **NEON TQ2 GEMV** — `simd_neon.rs` ternary GEMV with pos_mask + neg_mask decomposition over TQ2_0_g128 blocks
+- [x] **AVX2 TQ2 GEMV** — `simd_avx2.rs` ternary GEMV over 128-weight groups with FP16 scale broadcast
+- [x] **AVX-512 TQ2 GEMV** — `simd_avx512.rs` ternary GEMV with 512-bit lanes
+- [x] **Ternary dispatch** — `TernaryKernel` routes via `KernelDispatcher::auto_detect()` across NEON / AVX2 / AVX-512 / scalar tiers
+- [x] **Ternary dequant SIMD** — per-tier `dequant_ternary` for TQ2_0_g128 (mirrors the Q1 dequant layout)
+- [x] **Apple Silicon CPU baseline** — NEON TQ2 path measured at ~7–8 tok/s end-to-end on Ternary-Bonsai-1.7B via `scripts/cli_ternary.sh`
+
+## Phase 11 — Complete
+
+- [x] **Metal TQ2_0_g128 GEMV kernel** — per-kernel TQ2 dispatch path in `crates/oxibonsai-kernels/src/gpu_backend/metal_dispatch.rs`
+- [x] **`blocks_as_bytes_ternary` helper** — zero-copy TQ2 block upload to the Metal backend
+- [x] **Per-kernel dispatch parity with Q1** — Metal TQ2 path validated against scalar reference so CPU and Metal produce byte-identical output at `--temperature 0 --seed 42`
+- [x] **Metal graph groundwork** — `gpu_backend/metal_graph.rs` and `metal_prefill.rs` cover prefill + per-step GEMV composition ahead of the Phase 13.x fused path
+
+## Phase 12 — Complete
+
+- [x] **NVRTC kernel pipeline** — `gpu_backend/cuda_kernels.rs`, `cuda_attn_kernels.rs`, `cuda_prefill_kernels.rs`; runtime-compiled PTX in `kernel_sources/`
+- [x] **CUDA graph capture** — `gpu_backend/cuda_graph/` groups every layer op (RMSNorm, gemv v7/v8/v9 with residual, SwiGLU, gate+up, Q1 AoS→SoA and TQ2 block→SoA reformat) into a reusable CUDA graph
+- [x] **Fused Q1 + TQ2 full-forward** — `cuda_full_layer.rs` encodes a full Qwen3 layer into one graph launch for both quant families
+- [x] **Prefill path** — `gpu_backend/cuda_prefill.rs` shares kernel sources with decode to keep the prefill/decode invariants identical
+- [x] **`native-cuda` feature flag** — opt-in backend selected via `KernelDispatcher` alongside `cuda` (scirs2) and `metal`
+- [x] **Measured** — ~21.9 tok/s on Ternary-Bonsai-1.7B end-to-end via `scripts/cli_ternary.sh cuda`
+
+## Phase 13.x — Complete
+
+- [x] **Fused Metal TQ2 full-forward** — `gpu_backend/metal_full_layer/` encodes the 14-dispatch sequence (pre-attn RMSNorm → fused QKV → QK-norm + RoPE → KV-store → batched attention → attn output + residual → FFN RMSNorm → fused gate+up → SwiGLU → down + residual) into a single GPU command buffer per token
+- [x] **Fused Metal Q1 full-forward** — same command-buffer layout reused for 1-bit weights; shared with the TQ2 code path via a weight-family-generic encoder
+- [x] **Command buffer reuse** — per-layer argument buffers cached in `metal_full_layer/types.rs` to avoid per-token allocations
+- [x] **`scripts/bench_ternary.sh`** — 3-run CPU-vs-Metal averaging harness with best-of-N reporting
+- [x] **`scripts/download_ternary.sh`** — HF `hf` CLI fetch + safetensors → GGUF conversion wrapper
+- [x] **Measured** — ~50 tok/s (best ~57) on Ternary-Bonsai-1.7B on Apple Silicon (M-series), ~13× speedup vs the per-GEMV dispatch of Phase 11
+
 ## Performance Targets
 
 | Platform | Target | Status |
@@ -156,6 +210,11 @@
 | x86-64 AVX-512 | >= 30 t/s | 🔶 Kernels done, not benchmarked end-to-end |
 | ARM NEON | >= 18 t/s | 🔶 Kernels done, not benchmarked end-to-end |
 | WASM | >= 5 t/s | 🔶 Compiles; runtime throughput not benchmarked |
+| ARM NEON (ternary) | >= 14 t/s | 🔶 Apple Silicon measured ~7–8 t/s end-to-end on Ternary-Bonsai-1.7B |
+| x86-64 AVX2 (ternary) | >= 18 t/s | 🔶 Kernels done, not benchmarked end-to-end |
+| x86-64 AVX-512 (ternary) | >= 26 t/s | 🔶 Kernels done, not benchmarked end-to-end |
+| Metal fused TQ2 (Apple Silicon) | >= 30 t/s | ✅ Measured ~50 t/s (best ~57) on Ternary-Bonsai-1.7B |
+| CUDA native TQ2 (NVIDIA GPU) | >= 20 t/s | ✅ Measured ~21.9 t/s on Ternary-Bonsai-1.7B |
 
 ## Memory Targets
 
@@ -165,3 +224,6 @@
 | KV cache (4k context) | ~256 MB | ✅ Implemented |
 | Runtime overhead | < 50 MB | 🔶 Profiler available via `MemoryProfiler`; end-to-end not yet characterized |
 | Total (4k context) | < 1.5 GB | 🔶 Not profiled end-to-end |
+| Ternary-Bonsai-8B | ~1.75 GB | TQ2_0_g128 (34B/128w) |
+| Ternary-Bonsai-4B | ~900 MB | TQ2_0_g128 (34B/128w) |
+| Ternary-Bonsai-1.7B | ~390 MB | TQ2_0_g128 (34B/128w) |
