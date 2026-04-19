@@ -42,12 +42,15 @@ pub struct IdentityEmbedder {
 impl IdentityEmbedder {
     /// Create an embedder that produces vectors of length `dim`.
     ///
-    /// # Panics
-    ///
-    /// Panics with a clear message if `dim` is zero.
-    pub fn new(dim: usize) -> Self {
-        assert!(dim > 0, "IdentityEmbedder: dim must be > 0");
-        Self { dim }
+    /// Returns [`RagError::DimensionMismatch`] if `dim` is zero.
+    pub fn new(dim: usize) -> Result<Self, RagError> {
+        if dim == 0 {
+            return Err(RagError::DimensionMismatch {
+                expected: 1,
+                got: 0,
+            });
+        }
+        Ok(Self { dim })
     }
 
     /// Internal: hash bytes of `text` into a vector of `dim` floats.

@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.2] - 2026-04-19
+
+### Added
+- ONNX MatMulNBits (bits=2) ingestion — `oxibonsai convert --onnx` reads onnx-community Ternary releases directly and repacks them as GGUF (TQ2_0_g128)
+- Qwen3 ONNX tensor role mapping for the converter
+
+### Changed
+- Upgraded `oxionnx-proto` workspace dependency to 0.1.2
+- Workspace version bump to 0.1.2 across all nine subcrates and `[workspace.dependencies]`
+- Alpha → Stable uplift for `oxibonsai-tokenizer`, `oxibonsai-rag`, `oxibonsai-eval`, and `oxibonsai-serve`
+
 ## [0.1.1] - 2026-04-18
 
 ### Added
@@ -47,5 +58,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Comprehensive test suite (140 tests)
 - Cross-platform support (macOS, Linux, Windows, WASM)
 
+[0.1.2]: https://github.com/cool-japan/oxibonsai/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/cool-japan/oxibonsai/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/cool-japan/oxibonsai/releases/tag/v0.1.0

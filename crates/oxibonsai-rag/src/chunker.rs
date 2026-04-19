@@ -6,14 +6,24 @@
 //! 2. [`chunk_by_sentences`] — group consecutive sentences up to a maximum count.
 //! 3. [`chunk_by_paragraphs`] — split on blank lines (paragraph boundaries).
 
+use std::collections::HashMap;
+
 use serde::{Deserialize, Serialize};
+
+use crate::metadata_filter::MetadataValue;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Configuration
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Configuration for the sliding-window character chunker.
+///
+/// Marked `#[non_exhaustive]` so new knobs can be added in patch releases
+/// without breaking downstream code.  External crates must construct
+/// instances via [`ChunkConfig::default`] plus the `with_*` builders
+/// rather than a struct literal.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct ChunkConfig {
     /// Maximum number of characters per chunk (default 512).
     pub chunk_size: usize,
@@ -47,6 +57,27 @@ impl ChunkConfig {
         }
         Ok(())
     }
+
+    /// Set [`ChunkConfig::chunk_size`] (builder).
+    #[must_use]
+    pub fn with_chunk_size(mut self, chunk_size: usize) -> Self {
+        self.chunk_size = chunk_size;
+        self
+    }
+
+    /// Set [`ChunkConfig::overlap`] (builder).
+    #[must_use]
+    pub fn with_overlap(mut self, overlap: usize) -> Self {
+        self.overlap = overlap;
+        self
+    }
+
+    /// Set [`ChunkConfig::min_chunk_size`] (builder).
+    #[must_use]
+    pub fn with_min_chunk_size(mut self, min_chunk_size: usize) -> Self {
+        self.min_chunk_size = min_chunk_size;
+        self
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -64,6 +95,36 @@ pub struct Chunk {
     pub chunk_idx: usize,
     /// Byte offset of the first character of this chunk in the original document.
     pub char_offset: usize,
+    /// Arbitrary key/value metadata attached to this chunk.  Consumed by
+    /// [`crate::metadata_filter::MetadataFilter`] for targeted retrieval.
+    ///
+    /// Defaults to an empty map when deserialising older snapshots.
+    #[serde(default)]
+    pub metadata: HashMap<String, MetadataValue>,
+}
+
+impl Chunk {
+    /// Construct a chunk with no metadata.
+    pub fn new(text: String, doc_id: usize, chunk_idx: usize, char_offset: usize) -> Self {
+        Self {
+            text,
+            doc_id,
+            chunk_idx,
+            char_offset,
+            metadata: HashMap::new(),
+        }
+    }
+
+    /// Insert a metadata key/value pair (builder).
+    #[must_use]
+    pub fn with_metadata(
+        mut self,
+        key: impl Into<String>,
+        value: impl Into<MetadataValue>,
+    ) -> Self {
+        self.metadata.insert(key.into(), value.into());
+        self
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -102,12 +163,8 @@ pub fn chunk_document(text: &str, doc_id: usize, config: &ChunkConfig) -> Vec<Ch
         if chunk_text.chars().count() >= config.min_chunk_size {
             // Compute byte offset of `start`-th char in the original string
             let byte_offset = byte_offset_of_char(text, start);
-            chunks.push(Chunk {
-                text: chunk_text,
-                doc_id,
-                chunk_idx: chunks.len(),
-                char_offset: byte_offset,
-            });
+            let chunk_idx = chunks.len();
+            chunks.push(Chunk::new(chunk_text, doc_id, chunk_idx, byte_offset));
         }
 
         if end == total {
@@ -150,12 +207,13 @@ pub fn chunk_by_sentences(text: &str, doc_id: usize, max_sentences: usize) -> Ve
         let batch: Vec<&str> = sentences[batch_start..batch_end].to_vec();
         let chunk_text = batch.join(" ");
 
-        chunks.push(Chunk {
-            text: chunk_text,
+        let chunk_idx = chunks.len();
+        chunks.push(Chunk::new(
+            chunk_text,
             doc_id,
-            chunk_idx: chunks.len(),
-            char_offset: sentence_start_byte,
-        });
+            chunk_idx,
+            sentence_start_byte,
+        ));
 
         // Advance byte offset by the bytes consumed in this batch
         for s in &batch {
@@ -248,12 +306,8 @@ pub fn chunk_by_paragraphs(text: &str, doc_id: usize) -> Vec<Chunk> {
                 // We have just hit the first blank line — emit the paragraph
                 let para = text[para_start..line_start].trim();
                 if !para.is_empty() {
-                    chunks.push(Chunk {
-                        text: para.to_string(),
-                        doc_id,
-                        chunk_idx: chunks.len(),
-                        char_offset: byte_cursor,
-                    });
+                    let chunk_idx = chunks.len();
+                    chunks.push(Chunk::new(para.to_string(), doc_id, chunk_idx, byte_cursor));
                     byte_cursor = i;
                 }
                 para_start = i + 1;
@@ -273,12 +327,8 @@ pub fn chunk_by_paragraphs(text: &str, doc_id: usize) -> Vec<Chunk> {
             // Emit any remaining paragraph
             let para = text[para_start..].trim();
             if !para.is_empty() {
-                chunks.push(Chunk {
-                    text: para.to_string(),
-                    doc_id,
-                    chunk_idx: chunks.len(),
-                    char_offset: byte_cursor,
-                });
+                let chunk_idx = chunks.len();
+                chunks.push(Chunk::new(para.to_string(), doc_id, chunk_idx, byte_cursor));
             }
             break;
         }

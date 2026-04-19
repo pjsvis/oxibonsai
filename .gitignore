@@ -28,3 +28,6 @@ Thumbs.db
 # LLM
 **/CLAUDE.md
 **/.claude/
+
+# DL models
+models/*

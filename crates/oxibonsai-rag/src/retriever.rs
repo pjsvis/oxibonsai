@@ -11,6 +11,7 @@ use tracing::{debug, info};
 use crate::chunker::{chunk_document, ChunkConfig};
 use crate::embedding::Embedder;
 use crate::error::RagError;
+use crate::metadata_filter::MetadataFilter;
 use crate::vector_store::{SearchResult, VectorStore};
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -18,7 +19,11 @@ use crate::vector_store::{SearchResult, VectorStore};
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Configuration knobs for the [`Retriever`].
+///
+/// Marked `#[non_exhaustive]`; use [`RetrieverConfig::default`] plus the
+/// `with_*` builders for forward-compatible construction.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct RetrieverConfig {
     /// Maximum number of chunks to return per query.
     pub top_k: usize,
@@ -39,6 +44,29 @@ impl Default for RetrieverConfig {
             min_score: 0.0,
             rerank: false,
         }
+    }
+}
+
+impl RetrieverConfig {
+    /// Set [`RetrieverConfig::top_k`] (builder).
+    #[must_use]
+    pub fn with_top_k(mut self, top_k: usize) -> Self {
+        self.top_k = top_k;
+        self
+    }
+
+    /// Set [`RetrieverConfig::min_score`] (builder).
+    #[must_use]
+    pub fn with_min_score(mut self, min_score: f32) -> Self {
+        self.min_score = min_score;
+        self
+    }
+
+    /// Set [`RetrieverConfig::rerank`] (builder).
+    #[must_use]
+    pub fn with_rerank(mut self, rerank: bool) -> Self {
+        self.rerank = rerank;
+        self
     }
 }
 
@@ -69,6 +97,23 @@ impl<E: Embedder> Retriever<E> {
             embedder,
             config,
             doc_count: 0,
+        }
+    }
+
+    /// Low-level constructor used by the persistence layer to reassemble a
+    /// [`Retriever`] from its previously-persisted parts.
+    #[doc(hidden)]
+    pub fn from_parts(
+        embedder: E,
+        store: VectorStore,
+        doc_count: usize,
+        config: RetrieverConfig,
+    ) -> Self {
+        Self {
+            store,
+            embedder,
+            config,
+            doc_count,
         }
     }
 
@@ -147,6 +192,41 @@ impl<E: Embedder> Retriever<E> {
             query_len = query.len(),
             hits = results.len(),
             "retrieval complete"
+        );
+        Ok(results)
+    }
+
+    /// Retrieve the top-k chunks that pass a [`MetadataFilter`].
+    ///
+    /// The filter is validated before any search work is performed.
+    /// Returns [`RagError::EmptyQuery`] for blank queries,
+    /// [`RagError::NoDocumentsIndexed`] if the store is empty, and
+    /// [`RagError::InvalidFilter`] for malformed filters.
+    pub fn retrieve_filtered(
+        &self,
+        query: &str,
+        filter: &MetadataFilter,
+    ) -> Result<Vec<SearchResult>, RagError> {
+        if query.trim().is_empty() {
+            return Err(RagError::EmptyQuery);
+        }
+        if self.store.is_empty() {
+            return Err(RagError::NoDocumentsIndexed);
+        }
+
+        let query_vec = self.embedder.embed(query)?;
+        let mut results = self
+            .store
+            .search_filtered(&query_vec, self.config.top_k, filter)?;
+
+        if self.config.rerank {
+            results = rerank(results, query);
+        }
+
+        debug!(
+            query_len = query.len(),
+            hits = results.len(),
+            "filtered retrieval complete"
         );
         Ok(results)
     }

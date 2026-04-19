@@ -25,7 +25,9 @@ fn bench_dequant_ternary(c: &mut Criterion) {
             b.iter(|| {
                 dispatcher
                     .dequant_ternary_g128(black_box(&blocks), black_box(&mut output))
-                    .unwrap();
+                    .expect(
+                        "dequant_ternary_g128 should succeed with valid blocks and output buffer",
+                    );
             });
         });
     }
@@ -50,7 +52,7 @@ fn bench_gemv_ternary(c: &mut Criterion) {
                         n_rows,
                         k,
                     )
-                    .unwrap();
+                    .expect("gemv_ternary_g128 should succeed with valid ternary blocks and matching dimensions");
             });
         });
     }
@@ -75,7 +77,7 @@ fn bench_gemv_ternary_par(c: &mut Criterion) {
                     n_rows,
                     k,
                 )
-                .unwrap();
+                .expect("gemv_adaptive_ternary should succeed with valid ternary blocks and matching dimensions");
             });
         });
     }
@@ -104,7 +106,7 @@ fn bench_gemm_ternary_par(c: &mut Criterion) {
                     n_rows,
                     k,
                 )
-                .unwrap();
+                .expect("gemm_adaptive_ternary should succeed with valid ternary blocks and matching batch/matrix dimensions");
             });
         },
     );

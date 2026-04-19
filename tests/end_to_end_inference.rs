@@ -334,8 +334,9 @@ fn sampler_builder_to_engine() {
 
 #[test]
 fn config_builder_to_engine() {
+    let model_path = std::env::temp_dir().join("test_model.gguf");
     let config = ConfigBuilder::new()
-        .model_path("/tmp/test_model.gguf")
+        .model_path(model_path.to_string_lossy().as_ref())
         .max_seq_len(2048)
         .port(9090)
         .temperature(0.3)

@@ -23,7 +23,12 @@ use crate::{
 // ── TrainerConfig ─────────────────────────────────────────────────────────────
 
 /// Configuration for the BPE trainer.
+///
+/// Marked `#[non_exhaustive]` so that new training knobs can be added in
+/// future minor releases without a breaking change.  Downstream callers must
+/// construct it via [`TrainerConfig::new`] or [`TrainerConfig::default`].
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct TrainerConfig {
     /// Target vocabulary size (base 256 byte tokens + num_merges merged tokens).
     pub vocab_size: usize,
@@ -182,7 +187,7 @@ impl TrainedTokenizer {
     /// Convert this trained result into a ready-to-use [`OxiTokenizer`].
     ///
     /// The [`TokenizerConfig`] is set to defaults; callers may rebuild from the
-    /// raw [`vocab`] / [`merges`] fields if a custom config is needed.
+    /// raw `vocab` / `merges` fields if a custom config is needed.
     pub fn to_oxi_tokenizer(&self) -> OxiTokenizer {
         let mut vocabulary = Vocabulary::new();
         // Determine whether special-token slots are present by checking IDs 0-3.

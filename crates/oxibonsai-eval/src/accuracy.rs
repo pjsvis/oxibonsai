@@ -162,6 +162,134 @@ impl McEvaluator {
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
+// McLogitEvaluator
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// One scoring outcome from a logit-based multiple-choice evaluation.
+#[derive(Debug, Clone)]
+pub struct LogitMcResult {
+    /// Index of the option the evaluator picked.
+    pub picked: usize,
+    /// Whether [`LogitMcResult::picked`] equals the ground-truth index.
+    pub correct: bool,
+    /// Per-choice log-probabilities supplied by the caller.
+    pub per_choice: Vec<f32>,
+}
+
+/// Logit-based multiple-choice evaluator.
+///
+/// Unlike [`McEvaluator`] which parses a completion string, this evaluator
+/// takes caller-supplied per-choice log-probabilities (typically the sum of
+/// token log-probs for each candidate continuation) and picks the argmax.
+///
+/// The `prompt_template` is purely descriptive — it is stored so higher-level
+/// harnesses can record which prompt produced the scores but is not used for
+/// scoring itself.
+#[derive(Debug, Clone)]
+pub struct McLogitEvaluator {
+    /// Prompt template that was used to generate the per-choice log-probs.
+    pub prompt_template: String,
+}
+
+impl Default for McLogitEvaluator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl McLogitEvaluator {
+    /// Construct a new evaluator with the standard four-choice template.
+    pub fn new() -> Self {
+        Self {
+            prompt_template: "{question}\nA) {a}\nB) {b}\nC) {c}\nD) {d}\nAnswer:".to_string(),
+        }
+    }
+
+    /// Construct with a custom template.
+    pub fn with_template(template: &str) -> Self {
+        Self {
+            prompt_template: template.to_string(),
+        }
+    }
+
+    /// Score one question given per-choice log-probabilities.
+    ///
+    /// `per_choice[i]` is the total log-probability for choice `i`. The picked
+    /// choice is the argmax (ties → lowest index). An empty slice returns a
+    /// result with `picked = 0` and `correct = false` — callers should
+    /// pre-validate that the slice is non-empty for meaningful scoring.
+    pub fn score(&self, per_choice: &[f32], correct_answer: usize) -> LogitMcResult {
+        if per_choice.is_empty() {
+            return LogitMcResult {
+                picked: 0,
+                correct: false,
+                per_choice: Vec::new(),
+            };
+        }
+        let mut best_idx = 0usize;
+        let mut best_val = f32::NEG_INFINITY;
+        for (i, &v) in per_choice.iter().enumerate() {
+            if v > best_val {
+                best_val = v;
+                best_idx = i;
+            }
+        }
+        LogitMcResult {
+            picked: best_idx,
+            correct: best_idx == correct_answer,
+            per_choice: per_choice.to_vec(),
+        }
+    }
+
+    /// Evaluate an entire [`McDataset`] given per-question log-probability slates.
+    ///
+    /// `per_question[i]` must have exactly one log-prob per choice of
+    /// `dataset.questions[i]`. Mismatched slate shapes cause that question to
+    /// be scored as incorrect.
+    pub fn evaluate_dataset(
+        &self,
+        dataset: &McDataset,
+        per_question: &[Vec<f32>],
+    ) -> AccuracyResult {
+        let mut correct = 0usize;
+        let mut total = 0usize;
+        let mut by_subject_counts: HashMap<String, (usize, usize)> = HashMap::new();
+
+        for (q, slate) in dataset.questions.iter().zip(per_question.iter()) {
+            total += 1;
+            let out = self.score(slate, q.correct_answer);
+            if out.correct {
+                correct += 1;
+            }
+            if let Some(ref subj) = q.subject {
+                let entry = by_subject_counts.entry(subj.clone()).or_insert((0, 0));
+                entry.1 += 1;
+                if out.correct {
+                    entry.0 += 1;
+                }
+            }
+        }
+
+        let accuracy = if total == 0 {
+            0.0
+        } else {
+            correct as f32 / total as f32
+        };
+        let by_subject = by_subject_counts
+            .into_iter()
+            .map(|(s, (c, t))| (s, if t == 0 { 0.0 } else { c as f32 / t as f32 }))
+            .collect();
+
+        AccuracyResult {
+            correct,
+            total,
+            accuracy,
+            by_subject,
+        }
+    }
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
 // ExactMatchEvaluator
 // ──────────────────────────────────────────────────────────────────────────────
 

@@ -939,7 +939,7 @@ impl GpuBackendTrait for Scirs2BackendHandle {
 ///
 /// Priority order (highest to lowest):
 /// 1. [`Scirs2Backend`] (feature = "gpu") — Metal-accelerated via scirs2-core
-/// 2. [`NativeCudaBackend`] (feature = "native-cuda") — direct cudarc CUDA
+/// 2. `NativeCudaBackend` (feature = "native-cuda") — direct cudarc CUDA
 /// 3. CUDA stub (feature = "cuda", no "native-cuda") — falls back to CPU
 /// 4. Metal stub (feature = "metal", macOS only) — falls back to CPU
 /// 5. [`CpuBackend`] (always available)

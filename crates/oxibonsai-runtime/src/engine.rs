@@ -16,9 +16,7 @@ use oxibonsai_kernels::KernelDispatcher;
 use oxibonsai_model::model::BonsaiModel;
 
 use crate::batch_engine::{self, BatchResult};
-#[cfg(all(feature = "metal", target_os = "macos"))]
-use crate::error::RuntimeError;
-use crate::error::RuntimeResult;
+use crate::error::{RuntimeError, RuntimeResult};
 use crate::metrics::InferenceMetrics;
 #[cfg(all(feature = "metal", target_os = "macos"))]
 use crate::ngram_cache::NgramCache;
@@ -783,6 +781,46 @@ impl<'a> InferenceEngine<'a> {
         );
 
         Ok(output_tokens)
+    }
+}
+
+impl InferenceEngine<'static> {
+    /// Load an [`InferenceEngine`] directly from a path to a GGUF file.
+    ///
+    /// This is a convenience wrapper intended for server/CLI entry points that
+    /// need an owned, `'static` engine.  It memory-maps the file, parses the
+    /// GGUF container, and leaks both allocations so that the borrowed
+    /// `GgufFile<'a>` lifetime can be promoted to `'static`.
+    ///
+    /// The leaked memory is intentional — the engine is expected to live for
+    /// the process lifetime.  Do not call this in hot-paths.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RuntimeError::FileNotFound`] if `path` does not exist.  Other
+    /// IO / parse / model-init errors propagate through [`RuntimeError`].
+    pub fn from_gguf_path(
+        path: impl AsRef<std::path::Path>,
+        sampling_params: SamplingParams,
+        seed: u64,
+        max_seq_len: usize,
+    ) -> RuntimeResult<Self> {
+        let path_ref = path.as_ref();
+        if !path_ref.exists() {
+            return Err(RuntimeError::FileNotFound {
+                path: path_ref.display().to_string(),
+            });
+        }
+
+        // Memory-map and parse, then leak both so the resulting `GgufFile`
+        // can live for `'static` without RAII concerns.
+        let mmap = oxibonsai_core::gguf::reader::mmap_gguf_file(path_ref)?;
+        let mmap: &'static memmap2::Mmap = Box::leak(Box::new(mmap));
+        let gguf = oxibonsai_core::gguf::reader::GgufFile::parse(mmap)?;
+        let gguf: &'static oxibonsai_core::gguf::reader::GgufFile<'static> =
+            Box::leak(Box::new(gguf));
+
+        Self::from_gguf(gguf, sampling_params, seed, max_seq_len)
     }
 }
 

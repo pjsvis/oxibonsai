@@ -15,7 +15,11 @@ use crate::retriever::{Retriever, RetrieverConfig};
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Configuration for the full RAG pipeline.
+///
+/// Marked `#[non_exhaustive]`; use [`RagConfig::default`] combined with the
+/// `with_*` builders from external crates.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct RagConfig {
     /// How to chunk documents before indexing.
     pub chunk_config: ChunkConfig,
@@ -43,6 +47,43 @@ impl Default for RagConfig {
             context_separator: "\n---\n".to_string(),
             prompt_template: "{context}\n\nQuestion: {query}\n\nAnswer:".to_string(),
         }
+    }
+}
+
+impl RagConfig {
+    /// Set [`RagConfig::chunk_config`] (builder).
+    #[must_use]
+    pub fn with_chunk_config(mut self, chunk_config: ChunkConfig) -> Self {
+        self.chunk_config = chunk_config;
+        self
+    }
+
+    /// Set [`RagConfig::retriever_config`] (builder).
+    #[must_use]
+    pub fn with_retriever_config(mut self, retriever_config: RetrieverConfig) -> Self {
+        self.retriever_config = retriever_config;
+        self
+    }
+
+    /// Set [`RagConfig::max_context_chars`] (builder).
+    #[must_use]
+    pub fn with_max_context_chars(mut self, max_context_chars: usize) -> Self {
+        self.max_context_chars = max_context_chars;
+        self
+    }
+
+    /// Set [`RagConfig::context_separator`] (builder).
+    #[must_use]
+    pub fn with_context_separator(mut self, context_separator: impl Into<String>) -> Self {
+        self.context_separator = context_separator.into();
+        self
+    }
+
+    /// Set [`RagConfig::prompt_template`] (builder).
+    #[must_use]
+    pub fn with_prompt_template(mut self, prompt_template: impl Into<String>) -> Self {
+        self.prompt_template = prompt_template.into();
+        self
     }
 }
 
@@ -75,7 +116,7 @@ pub struct PipelineStats {
 /// use oxibonsai_rag::embedding::IdentityEmbedder;
 /// use oxibonsai_rag::pipeline::{RagConfig, RagPipeline};
 ///
-/// let embedder = IdentityEmbedder::new(64);
+/// let embedder = IdentityEmbedder::new(64).expect("valid dim");
 /// let mut pipeline = RagPipeline::new(embedder, RagConfig::default());
 ///
 /// pipeline.index_document("Rust is a systems programming language.").expect("failed to index document");

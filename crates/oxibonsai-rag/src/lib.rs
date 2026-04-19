@@ -19,7 +19,7 @@
 //! use oxibonsai_rag::embedding::IdentityEmbedder;
 //! use oxibonsai_rag::pipeline::{RagConfig, RagPipeline};
 //!
-//! let embedder = IdentityEmbedder::new(64);
+//! let embedder = IdentityEmbedder::new(64).expect("valid dim");
 //! let mut pipeline = RagPipeline::new(embedder, RagConfig::default());
 //!
 //! pipeline.index_document("Rust is a systems programming language.").expect("failed to index document");
@@ -29,10 +29,15 @@
 
 pub mod advanced_chunker;
 pub mod chunker;
+pub mod code_chunker;
+pub mod distance;
 pub mod embedding;
 pub mod error;
+pub mod metadata_filter;
+pub mod persistence;
 pub mod pipeline;
 pub mod retriever;
+pub mod semantic_chunker;
 pub mod vector_store;
 
 #[cfg(test)]
@@ -45,8 +50,13 @@ pub use advanced_chunker::{
     SentenceChunker, SlidingWindowChunker,
 };
 pub use chunker::{chunk_by_paragraphs, chunk_by_sentences, chunk_document, Chunk, ChunkConfig};
+pub use code_chunker::{CodeChunker, Language};
+pub use distance::Distance;
 pub use embedding::{Embedder, IdentityEmbedder, TfIdfEmbedder};
 pub use error::RagError;
+pub use metadata_filter::{MetadataFilter, MetadataValue};
+pub use persistence::{IndexSnapshot, RetrieverSnapshot, SCHEMA_VERSION};
 pub use pipeline::{PipelineStats, RagConfig, RagPipeline};
 pub use retriever::{Retriever, RetrieverConfig};
+pub use semantic_chunker::SemanticChunker;
 pub use vector_store::{cosine_similarity, dot_product, l2_normalize, SearchResult, VectorStore};

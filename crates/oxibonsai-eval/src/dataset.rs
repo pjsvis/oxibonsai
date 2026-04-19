@@ -189,6 +189,15 @@ impl EvalDataset {
         sampled
     }
 
+    /// Explicit alias for [`EvalDataset::sample`], surfacing the seeded
+    /// nature of the sampler in the name.
+    ///
+    /// Given identical `(n, seed)` inputs, the returned dataset is bit-identical
+    /// across runs and across platforms (LCG constants are fixed).
+    pub fn sample_with_seed(&self, n: usize, seed: u64) -> EvalDataset {
+        self.sample(n, seed)
+    }
+
     /// Split the dataset into train and test subsets.
     ///
     /// The first `floor(len * train_ratio)` examples become the training set;
@@ -340,6 +349,27 @@ impl McDataset {
             }
         }
         out
+    }
+
+    /// Return a deterministic random sample of `n` questions.
+    ///
+    /// Uses the same 64-bit LCG scheme as [`EvalDataset::sample_with_seed`].
+    pub fn sample_with_seed(&self, n: usize, seed: u64) -> McDataset {
+        let count = n.min(self.len());
+        let mut indices: Vec<usize> = (0..self.len()).collect();
+
+        let mut state = seed;
+        for i in (1..indices.len()).rev() {
+            state = lcg_step(state);
+            let j = (state >> 33) as usize % (i + 1);
+            indices.swap(i, j);
+        }
+
+        let mut sampled = McDataset::new(&self.name);
+        for &idx in indices.iter().take(count) {
+            sampled.add(self.questions[idx].clone());
+        }
+        sampled
     }
 
     /// Return a sorted, deduplicated list of all subject names in this dataset.

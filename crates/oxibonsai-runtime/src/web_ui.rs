@@ -64,8 +64,8 @@ async fn ui_health() -> Response {
 /// Build the UI sub-router.
 ///
 /// Routes:
-/// - `GET /ui`        → [`serve_chat_ui`]
-/// - `GET /ui/health` → [`ui_health`]
+/// - `GET /ui`        → `serve_chat_ui`
+/// - `GET /ui/health` → `ui_health`
 ///
 /// Merge this into an existing [`axum::Router`] with
 /// [`Router::merge`](axum::Router::merge).

@@ -17,7 +17,7 @@ mod tests {
     #[test]
     fn test_identity_embedder_produces_correct_dim() {
         for dim in [8, 16, 32, 64, 128] {
-            let emb = IdentityEmbedder::new(dim);
+            let emb = IdentityEmbedder::new(dim).expect("valid dim");
             assert_eq!(emb.embedding_dim(), dim);
             let v = emb.embed("hello world").expect("embed should succeed");
             assert_eq!(v.len(), dim, "wrong dim for size {dim}");
@@ -26,7 +26,7 @@ mod tests {
 
     #[test]
     fn test_identity_embedder_output_is_unit_vector() {
-        let emb = IdentityEmbedder::new(32);
+        let emb = IdentityEmbedder::new(32).expect("valid dim");
         let v = emb.embed("unit test text").expect("embed should succeed");
         let norm: f32 = v.iter().map(|x| x * x).sum::<f32>().sqrt();
         assert!((norm - 1.0).abs() < 1e-5, "norm = {norm}, expected ~1.0");
@@ -34,7 +34,7 @@ mod tests {
 
     #[test]
     fn test_identity_embedder_deterministic() {
-        let emb = IdentityEmbedder::new(32);
+        let emb = IdentityEmbedder::new(32).expect("valid dim");
         let v1 = emb.embed("determinism check").expect("embed");
         let v2 = emb.embed("determinism check").expect("embed");
         assert_eq!(v1, v2, "identical inputs must produce identical outputs");
@@ -168,12 +168,7 @@ mod tests {
     // ─────────────────────────────────────────────────────────────────────────
 
     fn make_chunk(text: &str) -> crate::chunker::Chunk {
-        crate::chunker::Chunk {
-            text: text.to_string(),
-            doc_id: 0,
-            chunk_idx: 0,
-            char_offset: 0,
-        }
+        crate::chunker::Chunk::new(text.to_string(), 0, 0, 0)
     }
 
     #[test]
@@ -307,7 +302,7 @@ mod tests {
 
     #[test]
     fn test_retriever_add_and_retrieve() {
-        let emb = IdentityEmbedder::new(32);
+        let emb = IdentityEmbedder::new(32).expect("valid dim");
         let config = RetrieverConfig {
             top_k: 3,
             ..Default::default()
@@ -333,7 +328,7 @@ mod tests {
 
     #[test]
     fn test_retriever_empty_document_error() {
-        let emb = IdentityEmbedder::new(16);
+        let emb = IdentityEmbedder::new(16).expect("valid dim");
         let mut ret = Retriever::new(emb, RetrieverConfig::default());
         let result = ret.add_document("   ", &ChunkConfig::default());
         assert!(matches!(result, Err(RagError::EmptyDocument)));
@@ -341,7 +336,7 @@ mod tests {
 
     #[test]
     fn test_retriever_empty_query_error() {
-        let emb = IdentityEmbedder::new(16);
+        let emb = IdentityEmbedder::new(16).expect("valid dim");
         let mut ret = Retriever::new(emb, RetrieverConfig::default());
         ret.add_document(
             "some content here for testing",
@@ -358,7 +353,7 @@ mod tests {
 
     #[test]
     fn test_retriever_no_documents_error() {
-        let emb = IdentityEmbedder::new(16);
+        let emb = IdentityEmbedder::new(16).expect("valid dim");
         let ret = Retriever::new(emb, RetrieverConfig::default());
         let result = ret.retrieve("anything");
         assert!(matches!(result, Err(RagError::NoDocumentsIndexed)));
@@ -366,7 +361,7 @@ mod tests {
 
     #[test]
     fn test_retriever_multiple_documents() {
-        let emb = IdentityEmbedder::new(64);
+        let emb = IdentityEmbedder::new(64).expect("valid dim");
         let config = RetrieverConfig {
             top_k: 5,
             ..Default::default()
@@ -396,7 +391,7 @@ mod tests {
 
     #[test]
     fn test_pipeline_build_prompt() {
-        let emb = IdentityEmbedder::new(64);
+        let emb = IdentityEmbedder::new(64).expect("valid dim");
         let mut pipeline = RagPipeline::new(emb, RagConfig::default());
         pipeline
             .index_document("Rust is a safe systems language.")
@@ -410,7 +405,7 @@ mod tests {
 
     #[test]
     fn test_pipeline_build_prompt_empty_query() {
-        let emb = IdentityEmbedder::new(16);
+        let emb = IdentityEmbedder::new(16).expect("valid dim");
         let pipeline = RagPipeline::new(emb, RagConfig::default());
         let result = pipeline.build_prompt("");
         assert!(matches!(result, Err(RagError::EmptyQuery)));
@@ -418,7 +413,7 @@ mod tests {
 
     #[test]
     fn test_pipeline_retrieve_context() {
-        let emb = IdentityEmbedder::new(64);
+        let emb = IdentityEmbedder::new(64).expect("valid dim");
         let cfg = RagConfig {
             chunk_config: ChunkConfig {
                 chunk_size: 80,
@@ -446,7 +441,7 @@ mod tests {
 
     #[test]
     fn test_pipeline_retrieve_context_no_docs() {
-        let emb = IdentityEmbedder::new(16);
+        let emb = IdentityEmbedder::new(16).expect("valid dim");
         let pipeline = RagPipeline::new(emb, RagConfig::default());
         // With no docs, build_prompt should still succeed (empty context)
         let prompt = pipeline.build_prompt("hello").expect("build_prompt");
@@ -455,7 +450,7 @@ mod tests {
 
     #[test]
     fn test_pipeline_stats() {
-        let emb = IdentityEmbedder::new(32);
+        let emb = IdentityEmbedder::new(32).expect("valid dim");
         let mut pipeline = RagPipeline::new(emb, RagConfig::default());
         let s0 = pipeline.stats();
         assert_eq!(s0.documents_indexed, 0);
@@ -492,7 +487,7 @@ mod tests {
              covering much of North Africa.",
         ];
 
-        let emb = IdentityEmbedder::new(128);
+        let emb = IdentityEmbedder::new(128).expect("valid dim");
         let cfg = RagConfig {
             chunk_config: ChunkConfig {
                 chunk_size: 200,

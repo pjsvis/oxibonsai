@@ -13,7 +13,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
 license = "Apache-2.0"
 repository = "https://github.com/cool-japan/oxibonsai"
@@ -26,15 +26,15 @@ categories = ["science", "algorithms", "command-line-utilities"]
 
 [workspace.dependencies]
 # ── Internal crates ──
-oxibonsai-core = { path = "crates/oxibonsai-core", version = "0.1.1" }
-oxibonsai-kernels = { path = "crates/oxibonsai-kernels", version = "0.1.1" }
-oxibonsai-model = { path = "crates/oxibonsai-model", version = "0.1.1" }
-oxibonsai-runtime = { path = "crates/oxibonsai-runtime", version = "0.1.1" }
-oxibonsai-tokenizer = { path = "crates/oxibonsai-tokenizer", version = "0.1.1" }
-oxibonsai-serve = { path = "crates/oxibonsai-serve", version = "0.1.1" }
-oxibonsai-rag = { path = "crates/oxibonsai-rag", version = "0.1.1" }
-oxibonsai-eval = { path = "crates/oxibonsai-eval", version = "0.1.1" }
-oxibonsai = { path = "crates/oxibonsai", version = "0.1.1" }
+oxibonsai-core = { path = "crates/oxibonsai-core", version = "0.1.2" }
+oxibonsai-kernels = { path = "crates/oxibonsai-kernels", version = "0.1.2" }
+oxibonsai-model = { path = "crates/oxibonsai-model", version = "0.1.2" }
+oxibonsai-runtime = { path = "crates/oxibonsai-runtime", version = "0.1.2", default-features = false }
+oxibonsai-tokenizer = { path = "crates/oxibonsai-tokenizer", version = "0.1.2" }
+oxibonsai-serve = { path = "crates/oxibonsai-serve", version = "0.1.2" }
+oxibonsai-rag = { path = "crates/oxibonsai-rag", version = "0.1.2" }
+oxibonsai-eval = { path = "crates/oxibonsai-eval", version = "0.1.2" }
+oxibonsai = { path = "crates/oxibonsai", version = "0.1.2" }
 
 # ── COOLJAPAN Ecosystem (Pure Rust Policy) ──
 scirs2-core = { version = "0.4.2", default-features = false }
@@ -84,16 +84,21 @@ mach2 = "0.6.0"
 rayon = "1.12.0"
 
 # ── Tokenizer ──
-tokenizers = { version = "0.22.2", default-features = false, features = ["onig"] }
+tokenizers = { version = "0.22.2", default-features = false, features = ["fancy-regex"] }
 
 # ── Model conversion ──
 safetensors = "0.7.0"
+oxionnx-proto = "0.1.2"
+
+# ── HTTP client ──
+reqwest = { version = "0.13", features = ["json"] }
 
 # ── Benchmarking (dev) ──
 criterion = { version = "0.8.2", features = ["html_reports"] }
 
 # ── Testing (dev) ──
 proptest = "1.11.0"
+tempfile = "3.27.0"
 
 [package]
 name = "oxibonsai-cli"
@@ -136,8 +141,7 @@ oxibonsai-eval = { workspace = true, optional = true }
 oxibonsai-tokenizer = { workspace = true, optional = true }
 oxibonsai-kernels.workspace = true
 oxibonsai-model.workspace = true
-oxibonsai-runtime = { path = "crates/oxibonsai-runtime", version = "0.1.1", default-features = false }
-oxibonsai-serve.workspace = true
+oxibonsai-runtime = { workspace = true, default-features = false }
 tracing.workspace = true
 anyhow.workspace = true
 serde.workspace = true
@@ -153,13 +157,12 @@ tokio.workspace = true
 
 [dev-dependencies]
 criterion.workspace = true
-proptest.workspace = true
 half.workspace = true
 oxibonsai-core.workspace = true
 oxibonsai-kernels.workspace = true
 oxibonsai-model.workspace = true
 oxibonsai-runtime.workspace = true
-reqwest = { version = "0.13", features = ["json"] }
+reqwest.workspace = true
 axum.workspace = true
 tower.workspace = true
 tokio.workspace = true

@@ -316,7 +316,7 @@ impl InferenceQueue {
 
     /// Submit an inference request.
     ///
-    /// Returns a [`Receiver`] that will yield the generated token IDs once the
+    /// Returns a `Receiver` that will yield the generated token IDs once the
     /// request is processed, or `None` if the queue is full.
     pub fn submit(
         &self,

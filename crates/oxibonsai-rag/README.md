@@ -1,8 +1,8 @@
 # oxibonsai-rag
 
-[![Version](https://img.shields.io/badge/version-0.1.1-blue)](https://crates.io/crates/oxibonsai-rag)
-[![Status](https://img.shields.io/badge/status-alpha-orange)](https://github.com/cool-japan/oxibonsai)
-[![Tests](https://img.shields.io/badge/tests-58_passing-brightgreen)](https://github.com/cool-japan/oxibonsai)
+[![Version](https://img.shields.io/badge/version-0.1.2-blue)](https://crates.io/crates/oxibonsai-rag)
+[![Status](https://img.shields.io/badge/status-stable-brightgreen)](https://github.com/cool-japan/oxibonsai)
+[![Tests](https://img.shields.io/badge/tests-206_passing-brightgreen)](https://github.com/cool-japan/oxibonsai)
 
 Pure Rust Retrieval-Augmented Generation (RAG) pipeline for OxiBonsai.
 
@@ -15,7 +15,7 @@ Part of the [OxiBonsai](https://github.com/cool-japan/oxibonsai) project.
 
 ## Status
 
-**Alpha** — version 0.1.1, 58 tests passing (`cargo nextest run -p oxibonsai-rag`).
+**Stable** — version 0.1.2, 206 tests passing (`cargo nextest run -p oxibonsai-rag`). Uplifted from Alpha in 0.1.2.
 
 ## Features
 
@@ -34,7 +34,7 @@ Part of the [OxiBonsai](https://github.com/cool-japan/oxibonsai) project.
 
 ```toml
 [dependencies]
-oxibonsai-rag = "0.1.1"
+oxibonsai-rag = "0.1.2"
 ```
 
 ```rust

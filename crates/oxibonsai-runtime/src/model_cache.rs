@@ -68,7 +68,7 @@ impl ModelEntry {
 
     /// Whether this entry has been idle for longer than `ttl`.
     pub fn is_stale(&self, ttl: Duration) -> bool {
-        self.idle_time() > ttl
+        self.idle_time() >= ttl
     }
 }
 

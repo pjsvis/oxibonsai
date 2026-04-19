@@ -187,10 +187,17 @@ impl EmbedderRegistry {
     /// fallback and is also used as `max_features` when fitting TF-IDF.
     pub fn new(default_dim: usize) -> Self {
         let dim = default_dim.max(1);
+        // `dim` is guaranteed ≥ 1 by the `.max(1)` clamp above, so
+        // `IdentityEmbedder::new` cannot fail here.  We still handle the
+        // `Err` branch explicitly to avoid `.expect()` in production code.
+        let identity = match IdentityEmbedder::new(dim) {
+            Ok(embedder) => embedder,
+            Err(_) => unreachable!("dim ≥ 1 was guaranteed by max(1) above"),
+        };
         Self {
             default_dim: dim,
             tfidf: std::sync::Mutex::new(None),
-            identity: IdentityEmbedder::new(dim),
+            identity,
         }
     }
 

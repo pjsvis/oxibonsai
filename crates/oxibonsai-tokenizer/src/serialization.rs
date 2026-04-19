@@ -2,11 +2,11 @@
 //!
 //! Format (plain text, UTF-8):
 //! Line 1: "oxitokenizer v1"
-//! Line 2: "vocab_size <N>"
-//! Line 3: "merges <M>"
-//! Lines 4..(4+N): "tok_id <id> <token_text_base64>"
-//! Lines (4+N)..(4+N+M): "merge <left_id> <right_id> <merged_id>"
-//! Special tokens (if any): "special <token_text_base64> <id>"
+//! Line 2: `"vocab_size <N>"`
+//! Line 3: `"merges <M>"`
+//! Lines 4..(4+N): `"tok_id <id> <token_text_base64>"`
+//! Lines (4+N)..(4+N+M): `"merge <left_id> <right_id> <merged_id>"`
+//! Special tokens (if any): `"special <token_text_base64> <id>"`
 
 use std::collections::HashMap;
 use std::fs::File;
@@ -47,7 +47,11 @@ pub fn base64_encode(bytes: &[u8]) -> String {
         }
     }
 
-    // SAFETY: we only pushed valid ASCII bytes
+    // SAFETY: `BASE64_CHARS` is ASCII-only and `=` is ASCII, so every byte we
+    // pushed is a valid ASCII character.  `String::from_utf8` therefore cannot
+    // fail — but rather than `unwrap`, we fall back to the empty string
+    // (keeps the function panic-free, matching the no-unwrap policy).  The
+    // caller's "decode failed" path will flag any such inconsistency cleanly.
     String::from_utf8(out).unwrap_or_default()
 }
 
@@ -155,7 +159,7 @@ pub struct TokenizerState {
     pub vocab: HashMap<u32, String>,
     /// (left_id, right_id, merged_id)
     pub merges: Vec<(u32, u32, u32)>,
-    /// special token name → id (e.g. "<BOS>" → 1)
+    /// special token name → id (e.g. `"<BOS>"` → 1)
     pub special_tokens: HashMap<String, u32>,
 }
 

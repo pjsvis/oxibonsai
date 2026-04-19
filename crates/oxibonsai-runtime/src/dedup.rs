@@ -279,7 +279,7 @@ impl DedupCache {
         }
     }
 
-    /// Insert a response with the [`DedupCache::default_ttl`].
+    /// Insert a response with the `DedupCache::default_ttl`.
     ///
     /// If the cache is at capacity, the entry with the smallest insertion
     /// sequence number (i.e. the oldest entry) is evicted first.

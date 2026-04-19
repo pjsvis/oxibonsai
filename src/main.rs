@@ -197,6 +197,10 @@ mod cli {
             /// Quantization format: tq2_0_g128 (default), q1_0_g128.
             #[arg(long, default_value = "tq2_0_g128")]
             quant: String,
+
+            /// Treat --from as an ONNX model file (MatMulNBits, bits=2) and use the ONNX→GGUF converter.
+            #[arg(long, default_value_t = false)]
+            onnx: bool,
         },
     }
 
@@ -737,16 +741,25 @@ mod cli {
                 println!("Output: {output}");
             }
 
-            Commands::Convert { from, to, quant } => {
+            Commands::Convert {
+                from,
+                to,
+                quant,
+                onnx,
+            } => {
                 use std::path::Path;
                 let from_path = Path::new(&from);
                 let to_path = Path::new(&to);
                 if !from_path.exists() {
-                    anyhow::bail!("input directory not found: {from}");
+                    anyhow::bail!("input path not found: {from}");
                 }
-                println!("Converting {from} -> {to} (quant: {quant})");
-                let stats =
-                    oxibonsai_model::convert::convert_hf_to_gguf(from_path, to_path, &quant)?;
+                let format = if onnx { "onnx" } else { "hf" };
+                println!("Converting {from} -> {to} (quant: {quant}, format: {format})");
+                let stats = if onnx {
+                    oxibonsai_model::convert_onnx_to_gguf(from_path, to_path, &quant)?
+                } else {
+                    oxibonsai_model::convert::convert_hf_to_gguf(from_path, to_path, &quant)?
+                };
                 println!(
                     "Done: {} tensors ({} ternary + {} fp32), output: {:.1} MB",
                     stats.n_tensors,

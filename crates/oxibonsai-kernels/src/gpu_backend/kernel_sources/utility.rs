@@ -153,8 +153,8 @@ kernel void residual_add(
 
 /// Fused SwiGLU reading from concatenated [gate, up] buffer.
 ///
-/// gate = buffer[0..n], up = buffer[n..2n]
-/// output[i] = silu(gate[i]) * up[i]
+/// `gate = buffer[0..n]`, `up = buffer[n..2n]`
+/// `output[i] = silu(gate[i]) * up[i]`
 ///
 /// Buffers: `"x"` → gate_up (0), `"result"` → output (1)
 /// Scalars: `"n"` → n (2)

@@ -543,10 +543,10 @@ impl MetalGraph {
         }
         Ok(())
     }
-    /// Ternary (TQ2_0_g128) twin of [`Self::encode_full_layer`].
+    /// Ternary (TQ2_0_g128) twin of `Self::encode_full_layer`.
     ///
     /// Identical control flow, but defers all GEMV work to the ternary
-    /// encoder [`Self::encode_layer_into_ternary`]. Intended for models whose
+    /// encoder `Self::encode_layer_into_ternary`. Intended for models whose
     /// attention/FFN projection weights are stored as TQ2_0_g128 blocks.
     #[allow(dead_code)]
     #[allow(clippy::too_many_arguments)]
@@ -848,12 +848,12 @@ impl MetalGraph {
         }
         Ok(())
     }
-    /// Ternary (TQ2_0_g128) twin of [`Self::encode_full_forward`].
+    /// Ternary (TQ2_0_g128) twin of `Self::encode_full_forward`.
     ///
-    /// Transformer layers dispatch through [`Self::encode_layer_into_ternary`],
+    /// Transformer layers dispatch through `Self::encode_layer_into_ternary`,
     /// so every attention/FFN projection is a TQ2 GEMV. The trailing
     /// `final_norm + lm_head + (optional argmax)` block is forwarded to the
-    /// shared [`Self::encode_tail_and_commit`] helper unchanged — the LM head
+    /// shared `Self::encode_tail_and_commit` helper unchanged — the LM head
     /// is expected to be a Q1 weight handle (ternary LM head is out of scope
     /// for this path). Pass `None` for both `final_norm_w` and `lm_head_w`
     /// to skip the tail (the caller then runs its own final-norm + LM-head

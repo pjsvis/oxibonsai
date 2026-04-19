@@ -235,7 +235,7 @@ impl NodeRegistry {
     /// Update the health status of a node.
     ///
     /// If `healthy` is `false` the node is kept in the registry but excluded
-    /// from routing via [`route_request`] and [`healthy_nodes`].
+    /// from routing via `route_request` and `healthy_nodes`.
     pub fn mark_healthy(&mut self, node_id: &str, healthy: bool) {
         if let Some(node) = self.nodes.get_mut(node_id) {
             node.healthy = healthy;
@@ -339,7 +339,7 @@ pub struct DistributedCoordinator {
 impl DistributedCoordinator {
     /// Create a new coordinator with the given configuration.
     ///
-    /// Does not automatically register `self` — call [`register_self`] to
+    /// Does not automatically register `self` — call `register_self` to
     /// add this node to the ring.
     pub fn new(config: CoordinatorConfig) -> Self {
         Self {

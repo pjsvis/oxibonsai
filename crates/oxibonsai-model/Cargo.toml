@@ -29,6 +29,8 @@ tracing.workspace = true
 safetensors.workspace = true
 anyhow.workspace = true
 serde_json.workspace = true
+oxionnx-proto.workspace = true
+memmap2.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true

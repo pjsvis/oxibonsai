@@ -10,7 +10,7 @@ Part of the [OxiBonsai](https://github.com/cool-japan/oxibonsai) project.
 
 ## Status
 
-**Stable** — 1,040 tests passing (`cargo nextest run -p oxibonsai-runtime --all-features`), version 0.1.1.
+**Stable** — 1,040 tests passing (`cargo nextest run -p oxibonsai-runtime --all-features`), version 0.1.2.
 
 ## Features
 
@@ -50,7 +50,7 @@ Part of the [OxiBonsai](https://github.com/cool-japan/oxibonsai) project.
 
 ```toml
 [dependencies]
-oxibonsai-runtime = "0.1.1"
+oxibonsai-runtime = "0.1.2"
 ```
 
 ```rust

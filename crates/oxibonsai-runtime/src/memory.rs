@@ -231,7 +231,7 @@ impl MemoryProfiler {
 
     /// Take a memory snapshot, updating the peak if necessary.
     ///
-    /// Alias for [`sample`] using the name required by the task specification.
+    /// Alias for `sample` using the name required by the task specification.
     pub fn take_snapshot(&self) -> MemorySnapshot {
         self.sample()
     }

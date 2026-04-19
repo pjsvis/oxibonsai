@@ -427,7 +427,7 @@ impl MetalGraph {
 
     /// Encode full-forward prefill for **verification** (speculative decoding).
     ///
-    /// Identical to [`encode_full_forward_prefill`] for the layer loop, but the
+    /// Identical to `encode_full_forward_prefill` for the layer loop, but the
     /// tail runs final RMSNorm + LM-head GEMM on **all** batch positions and
     /// returns per-position argmax token IDs instead of single-token logits.
     #[allow(clippy::too_many_arguments, clippy::type_complexity)]

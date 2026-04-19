@@ -10,18 +10,18 @@ OxiBonsai is a zero-FFI, zero-C/C++ inference engine for PrismML's sub-2-bit Bon
 
 ## Status
 
-**Version 0.1.1** — released 2026-04-18 · **2,935 tests passing** · ~99.6k lines of Rust · Pure Rust
+**Version 0.1.2** — released 2026-04-19 · **3,544 tests passing** · ~111k lines of Rust · Pure Rust
 
 | Crate | Status | Tests |
 |-------|--------|-------|
 | oxibonsai-core     | Stable | 243   |
-| oxibonsai-kernels  | Stable | 273   |
-| oxibonsai-model    | Stable | 1,012 |
+| oxibonsai-kernels  | Stable | 290   |
+| oxibonsai-model    | Stable | 1,045 |
 | oxibonsai-runtime  | Stable | 1,040 |
-| oxibonsai-tokenizer| Alpha  | 85    |
-| oxibonsai-rag      | Alpha  | 58    |
-| oxibonsai-eval     | Alpha  | 38    |
-| oxibonsai-serve    | Alpha  | 29    |
+| oxibonsai-tokenizer| Stable | 268   |
+| oxibonsai-rag      | Stable | 206   |
+| oxibonsai-eval     | Stable | 151   |
+| oxibonsai-serve    | Stable | 161   |
 | oxibonsai (facade) | Stable | —     |
 
 ## Features
@@ -118,7 +118,7 @@ OxiBonsai supports PrismML's full Bonsai lineup across both quantization familie
 
 Ternary weights trade roughly +600 MB (at 8B scale) for ~5 additional benchmark points over the 1-bit line. All models share the same Qwen3 architecture (GQA, SwiGLU, RoPE, RMSNorm), so the runtime, tokenizer, and server are identical across the family.
 
-> **Note:** PrismML publishes Ternary Bonsai as unpacked safetensors. Use `scripts/download_ternary.sh` (or `oxibonsai convert --quant tq2_0_g128`) to fetch and repack as GGUF before loading.
+> **Note:** PrismML publishes Ternary Bonsai as unpacked safetensors. Use `scripts/download_ternary.sh` (or `oxibonsai convert --quant tq2_0_g128`) to fetch and repack as GGUF before loading. An `onnx-community` ONNX release (MatMulNBits bits=2) is also supported via `oxibonsai convert --onnx`.
 
 ## Installation
 
@@ -126,7 +126,7 @@ Add OxiBonsai to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-oxibonsai = "0.1.1"
+oxibonsai = "0.1.2"
 ```
 
 ## Quick Start
@@ -175,11 +175,16 @@ oxibonsai info   --model models/Ternary-Bonsai-1.7B.gguf
 oxibonsai serve  --model models/Ternary-Bonsai-1.7B.gguf \
                  --host 127.0.0.1 --port 8080
 
-# Convert safetensors → GGUF directly (advanced)
+# Convert safetensors → GGUF (HuggingFace unpacked safetensors dir)
 oxibonsai convert \
   --from <unpacked-safetensors-dir> \
   --to models/my-model.gguf \
   --quant tq2_0_g128        # or q1_0_g128
+
+# Convert ONNX → GGUF (MatMulNBits bits=2, e.g. onnx-community/Ternary-Bonsai-1.7B-ONNX)
+oxibonsai convert --onnx \
+  --from path/to/model.onnx \
+  --to models/my-model.gguf
 ```
 
 ## CLI Smoke & Benchmark Scripts

@@ -5,19 +5,29 @@
 //! # Supported flags
 //!
 //! ```text
-//! --host <HOST>         Bind host          (default: 0.0.0.0)
-//! --port <PORT>         Bind port          (default: 8080)
+//! --config <PATH>       Path to a TOML configuration file (optional)
+//! --host <HOST>         Bind host           (default: 0.0.0.0)
+//! --port <PORT>         Bind port           (default: 8080)
 //! --model <PATH>        Path to GGUF model file
-//! --tokenizer <PATH>    Path to tokenizer  (optional)
-//! --max-tokens <N>      Default max tokens (default: 256)
+//! --tokenizer <PATH>    Path to tokenizer   (optional)
+//! --max-tokens <N>      Default max tokens  (default: 256)
 //! --temperature <F>     Default temperature (default: 0.7)
-//! --seed <N>            RNG seed           (default: 42)
-//! --log-level <LEVEL>   Logging level      (default: info)
+//! --seed <N>            RNG seed            (default: 42)
+//! --log-level <LEVEL>   Logging level       (default: info)
+//! --bearer-token <TOK>  Bearer-token to require (optional)
 //! --help                Print help and exit
 //! --version             Print version and exit
 //! ```
+//!
+//! The struct [`ServerArgs`] is marked `#[non_exhaustive]` so additional flags
+//! can be added in a future release without breaking downstream crates
+//! pattern-matching over it.
+
+use std::path::PathBuf;
 
 use thiserror::Error;
+
+use crate::config::PartialServerConfig;
 
 // ─── Error type ────────────────────────────────────────────────────────────
 
@@ -35,8 +45,11 @@ pub enum ParseError {
     /// A value could not be interpreted as the expected type.
     #[error("invalid value '{value}' for option '{option}': {reason}")]
     InvalidValue {
+        /// The option that failed to parse.
         option: String,
+        /// The raw string that was rejected.
         value: String,
+        /// A short explanation of why it was rejected.
         reason: String,
     },
 }
@@ -44,8 +57,14 @@ pub enum ParseError {
 // ─── ServerArgs ────────────────────────────────────────────────────────────
 
 /// Parsed server configuration derived from argv.
+///
+/// `#[non_exhaustive]` so new flags can be added later without forcing a
+/// major-version bump in downstream consumers.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub struct ServerArgs {
+    /// Optional TOML configuration file path.
+    pub config_path: Option<String>,
     /// Host address to bind to.
     pub host: String,
     /// TCP port to listen on.
@@ -62,11 +81,14 @@ pub struct ServerArgs {
     pub seed: u64,
     /// Tracing log level string (e.g. "info", "debug").
     pub log_level: String,
+    /// Optional bearer token to require on protected endpoints.
+    pub bearer_token: Option<String>,
 }
 
 impl Default for ServerArgs {
     fn default() -> Self {
         Self {
+            config_path: None,
             host: "0.0.0.0".to_string(),
             port: 8080,
             model_path: None,
@@ -75,7 +97,61 @@ impl Default for ServerArgs {
             temperature: 0.7,
             seed: 42,
             log_level: "info".to_string(),
+            bearer_token: None,
         }
+    }
+}
+
+impl ServerArgs {
+    /// Produce a [`PartialServerConfig`] carrying only the values that the user
+    /// *explicitly* specified on the command line.
+    ///
+    /// A value is considered "explicit" when it differs from the default.  This
+    /// keeps the CLI layer from accidentally overriding lower layers with
+    /// default values.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use oxibonsai_serve::args::ServerArgs;
+    /// let defaults = ServerArgs::default();
+    /// let partial = defaults.to_partial();
+    /// assert!(partial.host.is_none());
+    /// assert!(partial.port.is_none());
+    /// ```
+    pub fn to_partial(&self) -> PartialServerConfig {
+        let defaults = Self::default();
+        let mut partial = PartialServerConfig::default();
+
+        if self.host != defaults.host {
+            partial.host = Some(self.host.clone());
+        }
+        if self.port != defaults.port {
+            partial.port = Some(self.port);
+        }
+        if self.model_path.is_some() {
+            partial.model_path = self.model_path.as_ref().map(PathBuf::from);
+        }
+        if self.tokenizer_path.is_some() {
+            partial.tokenizer_path = self.tokenizer_path.as_ref().map(PathBuf::from);
+        }
+        if self.max_tokens != defaults.max_tokens {
+            partial.default_max_tokens = Some(self.max_tokens);
+        }
+        if (self.temperature - defaults.temperature).abs() > f32::EPSILON {
+            partial.default_temperature = Some(self.temperature);
+        }
+        if self.seed != defaults.seed {
+            partial.seed = Some(self.seed);
+        }
+        if self.log_level != defaults.log_level {
+            partial.log_level = Some(self.log_level.clone());
+        }
+        if self.bearer_token.is_some() {
+            partial.bearer_token = self.bearer_token.clone();
+        }
+
+        partial
     }
 }
 
@@ -110,6 +186,10 @@ pub fn parse_args_from(argv: &[String]) -> Result<Option<ServerArgs>, ParseError
             "--version" | "-V" => {
                 print_version();
                 return Ok(None);
+            }
+            "--config" => {
+                let val = next_value(&mut iter, "--config")?;
+                args.config_path = Some(val.to_string());
             }
             "--host" => {
                 let val = next_value(&mut iter, "--host")?;
@@ -160,6 +240,10 @@ pub fn parse_args_from(argv: &[String]) -> Result<Option<ServerArgs>, ParseError
                 validate_log_level(val)?;
                 args.log_level = val.to_string();
             }
+            "--bearer-token" => {
+                let val = next_value(&mut iter, "--bearer-token")?;
+                args.bearer_token = Some(val.to_string());
+            }
             other => {
                 return Err(ParseError::UnknownOption(other.to_string()));
             }
@@ -204,6 +288,7 @@ pub fn print_help() {
 Usage: oxibonsai-serve [OPTIONS]
 
 Options:
+  --config <PATH>       Path to a TOML configuration file (optional)
   --host <HOST>         Bind host (default: 0.0.0.0)
   --port <PORT>         Bind port (default: 8080)
   --model <PATH>        Path to GGUF model file
@@ -212,6 +297,7 @@ Options:
   --temperature <F>     Default temperature (default: 0.7)
   --seed <N>            RNG seed (default: 42)
   --log-level <LEVEL>   Logging level: error/warn/info/debug/trace (default: info)
+  --bearer-token <TOK>  Require the given bearer token on protected endpoints
   --help, -h            Show this help
   --version, -V         Show version"
     );
@@ -251,6 +337,8 @@ mod tests {
         assert_eq!(defaults.log_level, "info");
         assert!(defaults.model_path.is_none());
         assert!(defaults.tokenizer_path.is_none());
+        assert!(defaults.config_path.is_none());
+        assert!(defaults.bearer_token.is_none());
     }
 
     #[test]
@@ -275,6 +363,22 @@ mod tests {
             .expect("should parse")
             .expect("should not be help/version");
         assert_eq!(result.model_path, Some("/path/to/model.gguf".to_string()));
+    }
+
+    #[test]
+    fn parse_config_path() {
+        let result = parse_args_from(&args(&["--config", "/etc/oxibonsai.toml"]))
+            .expect("should parse")
+            .expect("should not be help/version");
+        assert_eq!(result.config_path, Some("/etc/oxibonsai.toml".to_string()));
+    }
+
+    #[test]
+    fn parse_bearer_token() {
+        let result = parse_args_from(&args(&["--bearer-token", "my-secret-token-abc"]))
+            .expect("should parse")
+            .expect("should not be help/version");
+        assert_eq!(result.bearer_token, Some("my-secret-token-abc".to_string()));
     }
 
     #[test]
@@ -333,5 +437,24 @@ mod tests {
     fn version_flag_returns_none() {
         let result = parse_args_from(&args(&["--version"])).expect("should not error");
         assert!(result.is_none(), "expected None for --version");
+    }
+
+    #[test]
+    fn to_partial_empty_for_defaults() {
+        let defaults = ServerArgs::default();
+        let partial = defaults.to_partial();
+        assert!(partial.host.is_none());
+        assert!(partial.port.is_none());
+        assert!(partial.default_max_tokens.is_none());
+    }
+
+    #[test]
+    fn to_partial_captures_overrides() {
+        let parsed = parse_args_from(&args(&["--host", "127.0.0.1", "--port", "9000"]))
+            .expect("should parse")
+            .expect("should not be help/version");
+        let partial = parsed.to_partial();
+        assert_eq!(partial.host.as_deref(), Some("127.0.0.1"));
+        assert_eq!(partial.port, Some(9000));
     }
 }

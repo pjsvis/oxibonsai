@@ -243,10 +243,7 @@ pub async fn index_documents(
         chunk_config.overlap = overlap;
     }
 
-    let rag_config = RagConfig {
-        chunk_config,
-        ..Default::default()
-    };
+    let rag_config = RagConfig::default().with_chunk_config(chunk_config);
 
     // Replace the pipeline with a freshly fitted one.
     let mut new_pipeline = RagPipeline::new(embedder, rag_config);

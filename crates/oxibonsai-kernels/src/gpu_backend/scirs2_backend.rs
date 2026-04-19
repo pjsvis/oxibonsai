@@ -959,7 +959,7 @@ impl Scirs2Backend {
 impl Scirs2Backend {
     /// Upload weight block bytes to a GPU buffer and return a reusable handle.
     ///
-    /// The returned [`GpuWeightHandle`] can be passed to
+    /// The returned [`GpuWeightHandle`](crate::weight_cache::GpuWeightHandle) can be passed to
     /// [`gemv_q1_g128_cached`](Self::gemv_q1_g128_cached) to perform GEMV
     /// without any host→device weight copy.
     pub fn upload_weights(
@@ -1043,7 +1043,7 @@ impl Scirs2Backend {
     /// Converts AoS block layout `[qs: [u8;32], d: f16]` (34 bytes/block) to
     /// SoA layout `[N×2B FP16 scales][N×32B qs data]` for coalesced GPU reads.
     ///
-    /// Returns a [`GpuWeightHandle`] for use with [`gemv_tq2_g128_cached`](Self::gemv_tq2_g128_cached).
+    /// Returns a [`GpuWeightHandle`](crate::weight_cache::GpuWeightHandle) for use with [`gemv_tq2_g128_cached`](Self::gemv_tq2_g128_cached).
     pub fn upload_weights_ternary(
         &self,
         blocks: &[oxibonsai_core::BlockTQ2_0_g128],

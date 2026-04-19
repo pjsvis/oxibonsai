@@ -95,8 +95,8 @@ impl NativeTokenizerBridge {
 
     /// Create a char-level fallback tokenizer with a ChatML template.
     ///
-    /// Convenience constructor that combines [`char_level_fallback`] and
-    /// [`with_chatml`] — handy for tests that exercise the chat-formatting
+    /// Convenience constructor that combines `char_level_fallback` and
+    /// `with_chatml` — handy for tests that exercise the chat-formatting
     /// path without a real vocab file.
     pub fn char_level_fallback_with_chatml() -> Self {
         Self::with_chatml(OxiTokenizer::char_level_stub(512))

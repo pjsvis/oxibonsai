@@ -1,5 +1,7 @@
 # oxibonsai-kernels
 
+[![Version](https://img.shields.io/badge/version-0.1.2-blue.svg)](https://crates.io/crates/oxibonsai-kernels)
+
 Q1_0_g128 (1-bit) and TQ2_0_g128 (ternary) compute kernels for OxiBonsai — dequantization, GEMV, GEMM, fused full-forward.
 
 Implements the full compute stack for 1-bit and ternary inference: scalar
@@ -9,7 +11,7 @@ cache-blocked GEMM, parallel Rayon dispatch, and production GPU backends
 
 Part of the [OxiBonsai](https://github.com/cool-japan/oxibonsai) project.
 
-**Status:** Stable (mature, complete) — 273 tests passing.
+**Status:** Stable (mature, complete) — 290 tests passing.
 
 ## Features
 
@@ -23,7 +25,7 @@ Part of the [OxiBonsai](https://github.com/cool-japan/oxibonsai) project.
 - `OneBitKernel` and `TernaryKernel` traits unified through `KernelDispatcher`
 - GPU backend trait (`GpuBackendTrait`) with three concrete paths:
   - **Metal**: fused full-forward TQ2 path (single command buffer) — ~50 tok/s on 1.7B ternary (~13× speedup)
-  - **Native CUDA**: NVRTC-compiled kernels with CUDA Graph execution (Phase 12 fused full-forward)
+  - **Native CUDA**: NVRTC-compiled kernels with CUDA Graph execution (multi-encoding pass); prefill path with dedicated attention kernels for KV-cache population
   - **scirs2-core backend**: portable CUDA/Metal via `scirs2-core::gpu`
 
 ## SIMD Tiers
@@ -40,8 +42,10 @@ Part of the [OxiBonsai](https://github.com/cool-japan/oxibonsai) project.
 | Feature | Purpose |
 |---------|---------|
 | `simd-avx2` | Enable AVX2+FMA SIMD kernels (x86-64) |
+| `avx2` | Alias for `simd-avx2` (Cargo shorthand) |
 | `simd-avx512` | Enable AVX-512 SIMD kernels (x86-64) |
 | `simd-neon` | Enable NEON SIMD kernels (AArch64) |
+| `neon` | Alias for `simd-neon` (Cargo shorthand) |
 | `metal` | Metal GPU backend + fused full-forward (macOS only) |
 | `native-cuda` | Native CUDA NVRTC backend via `cudarc` (Linux/Windows) |
 | `cuda` | scirs2-core CUDA backend (implies `gpu`) |
@@ -53,7 +57,7 @@ Part of the [OxiBonsai](https://github.com/cool-japan/oxibonsai) project.
 ```toml
 [dependencies]
 # Auto-detect at runtime:
-oxibonsai-kernels = { version = "0.1.1", features = ["simd-avx2"] }
+oxibonsai-kernels = { version = "0.1.2", features = ["simd-avx2"] }
 ```
 
 ```rust

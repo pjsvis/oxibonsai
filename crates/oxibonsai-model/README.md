@@ -7,8 +7,8 @@ Implements the full autoregressive forward pass for the Qwen3 architecture famil
 embedding, Grouped Query Attention with RoPE, SwiGLU MLP, RMSNorm, paged
 KV-cache, and Metal/CUDA full-forward integration via `oxibonsai-kernels`.
 
-**Status:** Stable — 1,012 tests passing (`cargo nextest run -p oxibonsai-model`)
-**Version:** 0.1.1
+**Status:** Stable — 1,045 tests passing (`cargo nextest run -p oxibonsai-model`)
+**Version:** 0.1.2
 
 Part of the [OxiBonsai](https://github.com/cool-japan/oxibonsai) project.
 
@@ -61,6 +61,10 @@ Part of the [OxiBonsai](https://github.com/cool-japan/oxibonsai) project.
 - `ExportFormat::TernaryG128` in `export.rs`
 - Checkpoint save/load (OXCK binary format)
 
+### Model Conversion
+- ONNX MatMulNBits (bits=2) ingestion via `oxibonsai convert --onnx` — reads onnx-community Ternary releases and repacks as GGUF TQ2_0_g128
+- Qwen3 ONNX tensor role mapping: automatically maps ONNX node names to the Qwen3 weight layout (embedding, QKV projections, gate/up/down FFN, RMSNorm scales)
+
 ### Scaling & Inference
 - Tensor parallelism, pipeline parallelism, multi-GPU utilities
 - Chunked prefill, prefix cache, disk cache
@@ -81,7 +85,7 @@ Part of the [OxiBonsai](https://github.com/cool-japan/oxibonsai) project.
 
 ```toml
 [dependencies]
-oxibonsai-model = "0.1.1"
+oxibonsai-model = "0.1.2"
 ```
 
 ## License

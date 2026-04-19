@@ -422,7 +422,7 @@ mod rag_tests {
 
     #[test]
     fn test_rag_pipeline_index_and_query() {
-        let embedder = IdentityEmbedder::new(32);
+        let embedder = IdentityEmbedder::new(32).expect("valid dim");
         let mut pipeline = RagPipeline::new(embedder, RagConfig::default());
 
         let chunks = pipeline
@@ -438,11 +438,9 @@ mod rag_tests {
 
     #[test]
     fn test_rag_pipeline_build_prompt_contains_context() {
-        let embedder = IdentityEmbedder::new(32);
-        let config = RagConfig {
-            prompt_template: "{context}\n\nQuestion: {query}\n\nAnswer:".to_string(),
-            ..RagConfig::default()
-        };
+        let embedder = IdentityEmbedder::new(32).expect("valid dim");
+        let config =
+            RagConfig::default().with_prompt_template("{context}\n\nQuestion: {query}\n\nAnswer:");
         let mut pipeline = RagPipeline::new(embedder, config);
 
         pipeline
@@ -461,12 +459,11 @@ mod rag_tests {
 
     #[test]
     fn test_rag_retriever_retrieve_text() {
-        let embedder = IdentityEmbedder::new(16);
-        let config = RetrieverConfig {
-            top_k: 2,
-            min_score: 0.0,
-            rerank: false,
-        };
+        let embedder = IdentityEmbedder::new(16).expect("valid dim");
+        let config = RetrieverConfig::default()
+            .with_top_k(2)
+            .with_min_score(0.0)
+            .with_rerank(false);
         let mut retriever = Retriever::new(embedder, config);
 
         retriever

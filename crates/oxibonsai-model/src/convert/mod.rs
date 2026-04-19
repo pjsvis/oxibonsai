@@ -4,6 +4,10 @@
 //! sharded safetensors files and `config.json`) into an OxiBonsai GGUF file
 //! with TQ2_0_g128 quantisation for weight tensors and FP32 for norm tensors.
 //!
+//! A sibling [`onnx`] module provides the same output format from HuggingFace
+//! MatMulNBits-quantized ONNX models (e.g. `onnx-community/Ternary-Bonsai-1.7B-ONNX`).
+//! Shared helpers live in [`common`].
+//!
 //! # Usage
 //!
 //! ```no_run
@@ -19,7 +23,9 @@
 //! println!("Converted {} tensors", stats.n_tensors);
 //! ```
 
+pub mod common;
 pub mod name_map;
+pub mod onnx;
 
 use std::collections::{BTreeMap, HashMap};
 use std::io::BufWriter;
@@ -29,26 +35,17 @@ use anyhow::Context;
 use safetensors::{Dtype, SafeTensors};
 use serde_json::Value;
 
-use oxibonsai_core::gguf::tensor_info::keys;
-use oxibonsai_core::gguf::writer::{GgufWriter, MetadataWriteValue, TensorEntry, TensorType};
-use oxibonsai_core::quant_ternary::{BlockTQ2_0_g128, BLOCK_TQ2_0_G128_BYTES};
+use oxibonsai_core::gguf::writer::{GgufWriter, TensorEntry, TensorType};
+use oxibonsai_core::quant_ternary::BlockTQ2_0_g128;
 
+use crate::convert::common::{
+    blocks_to_bytes, pad_to_multiple_of_128, read_config_json, write_metadata,
+};
 use crate::convert::name_map::hf_to_gguf_name;
 
-// ─── Public API ───────────────────────────────────────────────────────────────
+pub use crate::convert::common::ConvertStats;
 
-/// Statistics returned after a successful conversion.
-#[derive(Debug, Clone, Default)]
-pub struct ConvertStats {
-    /// Total number of tensors written to the GGUF file.
-    pub n_tensors: usize,
-    /// Number of tensors quantized to TQ2_0_g128.
-    pub n_ternary: usize,
-    /// Number of tensors stored as FP32.
-    pub n_fp32: usize,
-    /// Total size of the output GGUF file in bytes.
-    pub output_bytes: usize,
-}
+// ─── Public API ───────────────────────────────────────────────────────────────
 
 /// Convert a HuggingFace safetensors model directory to an OxiBonsai GGUF file.
 ///
@@ -76,7 +73,7 @@ pub fn convert_hf_to_gguf(
     }
 
     // ── 1. Read config.json ──────────────────────────────────────────────────
-    let config = read_config_json(from_dir)?;
+    let config = read_config_json(&from_dir.join("config.json"))?;
 
     // ── 2. Collect shard paths ───────────────────────────────────────────────
     let shard_paths = discover_shard_paths(from_dir)?;
@@ -109,8 +106,12 @@ pub fn convert_hf_to_gguf(
     // ── 4. Build GGUF writer ─────────────────────────────────────────────────
     let mut writer = GgufWriter::new();
 
-    // Write metadata from config.json
-    write_metadata(&mut writer, &config, from_dir)?;
+    // Model name derived from directory basename.
+    let model_name = from_dir
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("unknown");
+    write_metadata(&mut writer, &config, model_name)?;
 
     // ── 5. Determine tied-embedding flag ────────────────────────────────────
     let tie_word_embeddings = config
@@ -199,8 +200,7 @@ pub fn convert_hf_to_gguf(
             (raw, TensorType::F32)
         } else {
             // TQ2_0_g128 quantised tensor
-            let element_count: usize = pending.gguf_shape.iter().product::<u64>() as usize;
-            let f32_data = pad_to_multiple_of_128(&pending.f32_data, element_count);
+            let f32_data = pad_to_multiple_of_128(&pending.f32_data);
             let blocks = BlockTQ2_0_g128::quantize(&f32_data)
                 .with_context(|| format!("quantizing tensor '{}'", pending.gguf_name))?;
             let raw = blocks_to_bytes(&blocks);
@@ -251,16 +251,6 @@ struct TensorEntryPending {
     f32_data: Vec<f32>,
 }
 
-/// Read and parse `config.json` from the model directory.
-fn read_config_json(from_dir: &Path) -> anyhow::Result<Value> {
-    let config_path = from_dir.join("config.json");
-    let raw = std::fs::read_to_string(&config_path)
-        .with_context(|| format!("reading {:?}", config_path))?;
-    let value: Value =
-        serde_json::from_str(&raw).with_context(|| format!("parsing {:?}", config_path))?;
-    Ok(value)
-}
-
 /// Discover shard file paths from the model directory.
 ///
 /// Prefers a single `model.safetensors`; falls back to the shards listed in
@@ -305,67 +295,6 @@ fn discover_shard_paths(from_dir: &Path) -> anyhow::Result<Vec<PathBuf>> {
     Ok(paths)
 }
 
-/// Write model metadata from `config.json` into the GGUF writer.
-fn write_metadata(writer: &mut GgufWriter, config: &Value, from_dir: &Path) -> anyhow::Result<()> {
-    // Architecture constant
-    writer.add_metadata(
-        keys::GENERAL_ARCHITECTURE,
-        MetadataWriteValue::Str("qwen3".to_string()),
-    );
-
-    // Model name from directory basename
-    let model_name = from_dir
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("unknown")
-        .to_string();
-    writer.add_metadata(keys::GENERAL_NAME, MetadataWriteValue::Str(model_name));
-
-    // Quantisation version string
-    writer.add_metadata(
-        "general.quantization_version",
-        MetadataWriteValue::Str("TQ2_0_G128".to_string()),
-    );
-
-    // Integer keys (u32)
-    let u32_keys = [
-        (keys::LLM_BLOCK_COUNT, "num_hidden_layers"),
-        (keys::LLM_EMBEDDING_LENGTH, "hidden_size"),
-        (keys::LLM_FEED_FORWARD_LENGTH, "intermediate_size"),
-        (keys::LLM_ATTENTION_HEAD_COUNT, "num_attention_heads"),
-        (keys::LLM_ATTENTION_HEAD_COUNT_KV, "num_key_value_heads"),
-        (keys::LLM_CONTEXT_LENGTH, "max_position_embeddings"),
-        (keys::LLM_VOCAB_SIZE, "vocab_size"),
-    ];
-    for (gguf_key, json_key) in &u32_keys {
-        if let Some(val) = config.get(*json_key).and_then(Value::as_u64) {
-            writer.add_metadata(gguf_key, MetadataWriteValue::U32(val as u32));
-        } else {
-            tracing::warn!(json_key, "missing or non-u64 field in config.json");
-        }
-    }
-
-    // rms_norm_eps → F32
-    if let Some(eps) = config.get("rms_norm_eps").and_then(Value::as_f64) {
-        writer.add_metadata(
-            keys::LLM_ATTENTION_LAYER_NORM_RMS_EPSILON,
-            MetadataWriteValue::F32(eps as f32),
-        );
-    }
-
-    // rope_theta → F32 (default 10000.0 if absent)
-    let rope_theta = config
-        .get("rope_theta")
-        .and_then(Value::as_f64)
-        .unwrap_or(10000.0);
-    writer.add_metadata(
-        keys::LLM_ROPE_FREQ_BASE,
-        MetadataWriteValue::F32(rope_theta as f32),
-    );
-
-    Ok(())
-}
-
 /// Convert raw safetensors bytes to a `Vec<f32>` according to the dtype.
 ///
 /// Returns an empty vec for unsupported dtypes (caller should warn and skip).
@@ -385,36 +314,4 @@ fn to_f32_vec(dtype: Dtype, data: &[u8]) -> Vec<f32> {
             .collect(),
         _ => vec![],
     }
-}
-
-/// Pad (or trim) `f32_data` to a multiple of 128 elements for TQ2_0_g128
-/// quantization.  We pad with zeros and trim to the true element count
-/// afterwards to avoid data loss.
-fn pad_to_multiple_of_128(f32_data: &[f32], _element_count: usize) -> Vec<f32> {
-    let len = f32_data.len();
-    let remainder = len % 128;
-    if remainder == 0 {
-        f32_data.to_vec()
-    } else {
-        let padded_len = len + (128 - remainder);
-        let mut padded = f32_data.to_vec();
-        padded.resize(padded_len, 0.0f32);
-        padded
-    }
-}
-
-/// Serialise a slice of `BlockTQ2_0_g128` blocks to raw bytes.
-///
-/// Each block is 34 bytes: 32 bytes of packed `qs` + 2 bytes of FP16 `d`.
-///
-/// # Safety
-///
-/// `BlockTQ2_0_g128` is `#[repr(C)]` with a compile-time size assertion of
-/// exactly 34 bytes.  The cast is safe because we verify the total byte length
-/// matches `blocks.len() * BLOCK_TQ2_0_G128_BYTES`.
-fn blocks_to_bytes(blocks: &[BlockTQ2_0_g128]) -> Vec<u8> {
-    let total = blocks.len() * BLOCK_TQ2_0_G128_BYTES;
-    // SAFETY: repr(C) layout with compile-time size check; byte length verified.
-    let bytes: &[u8] = unsafe { std::slice::from_raw_parts(blocks.as_ptr() as *const u8, total) };
-    bytes.to_vec()
 }

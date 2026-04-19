@@ -17,7 +17,12 @@ use crate::{
 // ── TokenizerConfig ───────────────────────────────────────────────────────────
 
 /// Configuration knobs for an [`OxiTokenizer`].
+///
+/// Marked `#[non_exhaustive]` so that new optional knobs can be added in
+/// future minor releases without breaking downstream code.  Inside this crate
+/// struct literals with `..Default::default()` continue to work.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct TokenizerConfig {
     /// Whether to prepend a BOS (beginning-of-sequence) token.
     pub add_bos: bool,
@@ -33,6 +38,15 @@ pub struct TokenizerConfig {
     pub pad_token_id: u32,
     /// Optional maximum output length (tokens are truncated, not padded).
     pub max_length: Option<usize>,
+    /// When `true`, the decoder applies the GPT-2 **bytes ↔ unicode** inverse
+    /// map to every token string before emitting bytes (see
+    /// [`crate::hf_format`]).  When `false`, the legacy `Ġ`-stripping path is
+    /// used (same behaviour as 0.1.x).
+    ///
+    /// `from_json_file` / `OxiTokenizer::from_hf_tokenizer_json` set this to
+    /// `true` automatically; hand-built configs default to `false` for
+    /// backwards compatibility.
+    pub byte_level_decode: bool,
 }
 
 impl Default for TokenizerConfig {
@@ -45,6 +59,7 @@ impl Default for TokenizerConfig {
             unk_token_id: 0,
             pad_token_id: 3,
             max_length: None,
+            byte_level_decode: false,
         }
     }
 }
@@ -57,7 +72,7 @@ impl Default for TokenizerConfig {
 /// - Standard BPE encoding via a merge table
 /// - Optional BOS/EOS injection
 /// - Byte-fallback for out-of-vocabulary bytes
-/// - Character-level stub mode (no vocab file needed — useful in tests)
+/// - Character-level mode (no trained vocab needed — useful in tests)
 pub struct OxiTokenizer {
     vocab: Vocabulary,
     merges: BpeMerges,
@@ -121,7 +136,7 @@ impl OxiTokenizer {
         Ok(ids)
     }
 
-    /// Encode a batch of texts in sequence (returns one Vec<u32> per input).
+    /// Encode a batch of texts in sequence (returns one `Vec<u32>` per input).
     pub fn encode_batch(&self, texts: &[&str]) -> TokenizerResult<Vec<Vec<u32>>> {
         texts.iter().map(|t| self.encode(t)).collect()
     }
@@ -132,38 +147,69 @@ impl OxiTokenizer {
     /// Byte-fallback tokens (`<0xHH>`) are decoded back to their original byte.
     /// Unknown IDs that are not in the vocabulary produce `\u{FFFD}` (replacement
     /// character) rather than an error, to be maximally robust.
+    ///
+    /// When `config.byte_level_decode` is `true`, tokens are run through the
+    /// full 256-entry GPT-2 **unicode → byte** inverse map (see
+    /// [`crate::hf_format`]).  Otherwise the legacy `Ġ`-stripping path is used.
     pub fn decode(&self, ids: &[u32]) -> TokenizerResult<String> {
+        let bytes = self.decode_to_bytes(ids);
+        String::from_utf8(bytes).map_err(|e| TokenizerError::DecodeFailed(e.to_string()))
+    }
+
+    /// Decode to raw bytes — used by both [`Self::decode`] and the streaming
+    /// decoder so that the two paths stay byte-for-byte identical.
+    pub(crate) fn decode_to_bytes(&self, ids: &[u32]) -> Vec<u8> {
         let mut bytes: Vec<u8> = Vec::with_capacity(ids.len() * 2);
 
         for &id in ids {
-            // Skip special tokens.
-            if self.special_ids.contains(&id) {
-                continue;
-            }
-
-            let token = match self.vocab.get_token(id) {
-                Some(t) => t,
-                None => {
-                    // Unknown ID → replacement character bytes.
-                    bytes.extend_from_slice("\u{FFFD}".as_bytes());
-                    continue;
-                }
-            };
-
-            // Decode byte-fallback tokens: `<0xHH>` → one raw byte.
-            if let Some(byte) = parse_byte_fallback(token) {
-                bytes.push(byte);
-            } else {
-                // Strip the GPT-2 space prefix (Ġ = U+0120) and push UTF-8.
-                let stripped = token.trim_start_matches('\u{0120}');
-                if token.starts_with('\u{0120}') && !bytes.is_empty() {
-                    bytes.push(b' ');
-                }
-                bytes.extend_from_slice(stripped.as_bytes());
-            }
+            self.decode_id_into(id, &mut bytes);
         }
 
-        String::from_utf8(bytes).map_err(|e| TokenizerError::DecodeFailed(e.to_string()))
+        bytes
+    }
+
+    /// Append the UTF-8 bytes for a single token ID to `bytes`.
+    ///
+    /// Special tokens are silently dropped.  Unknown IDs produce `\u{FFFD}`.
+    pub(crate) fn decode_id_into(&self, id: u32, bytes: &mut Vec<u8>) {
+        if self.special_ids.contains(&id) {
+            return;
+        }
+
+        let token = match self.vocab.get_token(id) {
+            Some(t) => t,
+            None => {
+                bytes.extend_from_slice("\u{FFFD}".as_bytes());
+                return;
+            }
+        };
+
+        // Byte-fallback tokens: `<0xHH>` → raw byte.
+        if let Some(byte) = parse_byte_fallback(token) {
+            bytes.push(byte);
+            return;
+        }
+
+        if self.config.byte_level_decode {
+            // Full GPT-2 bytes-to-unicode inverse mapping.
+            for ch in token.chars() {
+                if let Some(b) = crate::hf_format::unicode_to_byte(ch) {
+                    bytes.push(b);
+                } else {
+                    // Non-byte-level character — emit UTF-8 verbatim.
+                    let mut buf = [0u8; 4];
+                    let s = ch.encode_utf8(&mut buf);
+                    bytes.extend_from_slice(s.as_bytes());
+                }
+            }
+        } else {
+            // Legacy `Ġ`-stripping path — kept bit-for-bit identical to 0.1.x.
+            let stripped = token.trim_start_matches('\u{0120}');
+            if token.starts_with('\u{0120}') && !bytes.is_empty() {
+                bytes.push(b' ');
+            }
+            bytes.extend_from_slice(stripped.as_bytes());
+        }
     }
 
     /// Decode a single token ID to its string representation.
@@ -206,12 +252,62 @@ impl OxiTokenizer {
         Ok(Self::new(vocab, merges, config))
     }
 
-    /// Create a character-level stub tokenizer for testing.
+    /// Load a tokenizer from a HuggingFace-style `tokenizer.json` file.
+    ///
+    /// This routes through [`crate::hf_format::HfTokenizerJson`] which:
+    ///
+    /// 1. Parses the `model.vocab` map (token → id).
+    /// 2. Parses the `model.merges` list (both string-pair and array-pair forms).
+    /// 3. Picks up the `added_tokens` / `special_tokens` block.
+    /// 4. Sets `byte_level_decode = true` on the returned config so that
+    ///    decode() correctly reverses the GPT-2 bytes-to-unicode map.
+    ///
+    /// Any field not expressible in [`TokenizerConfig`] (truncation policy,
+    /// normalizer variants, ...) is ignored but does not cause an error so
+    /// that loading a live HF file "just works".
+    pub fn from_json_file(path: impl AsRef<std::path::Path>) -> TokenizerResult<Self> {
+        let json = std::fs::read_to_string(path)?;
+        Self::from_hf_tokenizer_json(&json)
+    }
+
+    /// In-memory variant of [`Self::from_json_file`] that takes the JSON as a
+    /// `&str`.  Useful for WASM builds and for tests that embed a tokenizer
+    /// fixture verbatim.
+    pub fn from_hf_tokenizer_json(json: &str) -> TokenizerResult<Self> {
+        let parsed = crate::hf_format::HfTokenizerJson::parse(json)?;
+        parsed.into_tokenizer()
+    }
+
+    /// Begin streaming decode.  Returns a [`crate::streaming::StreamingDecoder`]
+    /// that keeps UTF-8 state across `push_token` calls — essential for server
+    /// code that emits one token at a time.
+    pub fn streaming_decoder(&self) -> crate::streaming::StreamingDecoder<'_> {
+        crate::streaming::StreamingDecoder::new(self)
+    }
+
+    /// Access the tokenizer configuration (read-only).
+    pub fn config(&self) -> &TokenizerConfig {
+        &self.config
+    }
+
+    /// Access the vocabulary (read-only).
+    pub fn vocab(&self) -> &Vocabulary {
+        &self.vocab
+    }
+
+    /// Access the merge table (read-only).
+    pub fn merges(&self) -> &BpeMerges {
+        &self.merges
+    }
+
+    /// Create a character-level tokenizer (no trained merges) for testing
+    /// and examples.
     ///
     /// Assigns IDs 4..vocab_size to printable ASCII characters (space = 4,
     /// '!' = 5, ...) with IDs 0-3 reserved for UNK/BOS/EOS/PAD.
     ///
     /// This tokenizer has no BPE merges: each character is its own token.
+    /// The `_stub` suffix is retained for API compatibility.
     pub fn char_level_stub(vocab_size: usize) -> Self {
         assert!(
             vocab_size >= 4,
@@ -255,6 +351,7 @@ impl OxiTokenizer {
             unk_token_id: 0,
             pad_token_id: 3,
             max_length: None,
+            byte_level_decode: false,
         };
 
         let merges = BpeMerges::new();

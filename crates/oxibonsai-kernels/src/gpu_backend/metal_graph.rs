@@ -974,7 +974,7 @@ impl MetalGraph {
 
     /// Execute a single TQ2_0_g128 (ternary) GEMV: `output = weight × input`.
     ///
-    /// Mirror of [`encode_gemv`] for ternary weights. `weight` must have been
+    /// Mirror of `encode_gemv` for ternary weights. `weight` must have been
     /// uploaded via [`upload_tq2_weight_soa`](Self::upload_tq2_weight_soa).
     pub fn encode_gemv_tq2(
         &self,

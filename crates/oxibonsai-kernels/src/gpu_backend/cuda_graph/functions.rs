@@ -21,21 +21,25 @@ fn fnv1a_64(data: &[u8]) -> u64 {
     }
     h
 }
+/// Build the on-disk cache path for a compiled PTX artifact.
+fn ptx_cache_path(src_hash: u64, tag: &str) -> std::path::PathBuf {
+    std::env::temp_dir().join(format!("oxibonsai_ptx_{src_hash:016x}_{tag}.ptx"))
+}
 /// Try to load a compiled PTX from the disk cache.
 fn load_ptx_cache(src_hash: u64, tag: &str) -> Option<cudarc::nvrtc::Ptx> {
-    let path = format!("/tmp/oxibonsai_ptx_{src_hash:016x}_{tag}.ptx");
+    let path = ptx_cache_path(src_hash, tag);
     let ptx_src = std::fs::read_to_string(&path).ok()?;
     Some(cudarc::nvrtc::Ptx::from_src(ptx_src))
 }
 /// Save a compiled PTX to the disk cache (best-effort; ignores write errors).
 fn save_ptx_cache(ptx: &cudarc::nvrtc::Ptx, src_hash: u64, tag: &str) {
-    let path = format!("/tmp/oxibonsai_ptx_{src_hash:016x}_{tag}.ptx");
+    let path = ptx_cache_path(src_hash, tag);
     let _ = std::fs::write(&path, ptx.to_src());
 }
 /// Compile PTX from CUDA C source, using a disk cache keyed on the source hash.
 ///
-/// First call: compiles via NVRTC (~5s), saves to /tmp.
-/// Subsequent calls: loads from /tmp (~1ms), skips NVRTC entirely.
+/// First call: compiles via NVRTC (~5s), saves to the OS temp dir.
+/// Subsequent calls: loads from the OS temp dir (~1ms), skips NVRTC entirely.
 pub(crate) fn compile_or_load_ptx(
     src: &str,
     tag: &str,

@@ -22,3 +22,4 @@ Full retrieval-augmented generation pipeline implemented with multiple chunking 
 - [x] `RagPipeline` — end-to-end pipeline with `RagConfig`
 - [x] Error types (`RagError`) — `EmptyDocument`, `EmptyQuery`, `NoDocumentsIndexed`, `DimensionMismatch`
 - [x] Integration tests for all chunking strategies (`advanced_chunker_tests.rs`)
+- [x] Alpha → Stable uplift for `oxibonsai-rag` — distance metrics, metadata filtering, JSON persistence, semantic & code chunkers, property-based tests, criterion benches

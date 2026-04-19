@@ -154,3 +154,6 @@ pub use pruning::{
     PruningGranularity, ScoreStats, SparsityReport,
 };
 pub use weight_tying::{TiedEmbedding, TyingError};
+
+pub use convert::onnx::{convert_onnx_to_gguf, DequantError as OnnxDequantError, OnnxImportError};
+pub use convert::ConvertStats;

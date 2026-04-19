@@ -223,7 +223,9 @@ impl ChatTemplate {
 ///
 /// The evaluator is a simple state machine that handles `{% for %}`, `{% if %}`,
 /// `{% else %}`, `{% endif %}`, `{% endfor %}`, and `{{ var }}` tags.
-fn render_template(template: &str, messages: &[(&str, &str)]) -> String {
+///
+/// Exposed at crate level so that [`crate::chat_templates`] can share it.
+pub(crate) fn render_template(template: &str, messages: &[(&str, &str)]) -> String {
     // Split the template into tokens: literals and tags.
     let tokens = tokenize_template(template);
 
