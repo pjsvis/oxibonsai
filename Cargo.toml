@@ -44,7 +44,7 @@ oxifft = "0.2.0"
 
 # ── GPU backends ──
 metal = "0.33.0"
-cudarc = { version = "0.19", features = ["nvrtc", "cuda-12000"] }
+cudarc = { version = "0.19", features = ["nvrtc", "cuda-version-from-build-system", "fallback-latest"] }
 objc = "0.2"
 
 # ── Error handling ──
