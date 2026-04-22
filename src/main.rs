@@ -13,6 +13,7 @@ mod cli {
     use clap::{Parser, Subcommand};
     use std::io::{self, BufRead, Write};
     use std::path::Path;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
 
     use oxibonsai_runtime::OxiBonsaiConfig;
@@ -202,6 +203,40 @@ mod cli {
             #[arg(long, default_value_t = false)]
             onnx: bool,
         },
+
+        /// Manage the Qwen3 tokenizer (download / inspect).
+        Tokenizer {
+            #[command(subcommand)]
+            cmd: TokenizerCmd,
+        },
+    }
+
+    #[derive(Subcommand)]
+    pub enum TokenizerCmd {
+        /// Download tokenizer.json from HuggingFace and save it next to the model.
+        ///
+        /// Example:
+        ///   oxibonsai tokenizer download --output models/tokenizer.json
+        Download {
+            /// Destination path (default: models/tokenizer.json in the current directory).
+            #[arg(long, default_value = "models/tokenizer.json")]
+            output: String,
+
+            /// HuggingFace repo to download from (must contain tokenizer.json).
+            #[arg(long, default_value = "Qwen/Qwen3-8B")]
+            repo: String,
+
+            /// Overwrite an existing tokenizer.json without prompting.
+            #[arg(long, default_value_t = false)]
+            force: bool,
+        },
+
+        /// Show the vocabulary size and model type stored in tokenizer.json.
+        Info {
+            /// Path to tokenizer.json.
+            #[arg(long, default_value = "models/tokenizer.json")]
+            path: String,
+        },
     }
 
     pub fn read_prompt_stdin() -> String {
@@ -214,6 +249,30 @@ mod cli {
             }
         }
         lines.join("\n")
+    }
+
+    /// Resolve the tokenizer path: use the explicit path if given, otherwise
+    /// auto-detect `tokenizer.json` in the same directory as the model file.
+    /// Returns `None` when neither source exists.
+    fn resolve_tokenizer(tokenizer: Option<&str>, model_path: &str) -> Option<String> {
+        if let Some(p) = tokenizer {
+            return Some(p.to_string());
+        }
+        // Auto-detect: look for tokenizer.json next to the model file
+        let model = Path::new(model_path);
+        let candidate = model
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join("tokenizer.json");
+        if candidate.exists() {
+            tracing::info!(
+                path = %candidate.display(),
+                "auto-detected tokenizer alongside model"
+            );
+            Some(candidate.to_string_lossy().into_owned())
+        } else {
+            None
+        }
     }
 
     pub async fn run() -> anyhow::Result<()> {
@@ -272,12 +331,13 @@ mod cli {
                 )?;
 
                 // Tokenize prompt and retain the bridge for streaming decode
-                let (prompt_tokens, tok_bridge) = if let Some(tok_path) = &tokenizer {
+                let resolved_tok = resolve_tokenizer(tokenizer.as_deref(), &model);
+                let (prompt_tokens, tok_bridge) = if let Some(tok_path) = &resolved_tok {
                     let tok = oxibonsai_runtime::TokenizerBridge::from_file(tok_path)?;
                     let tokens = tok.encode(&prompt_text)?;
                     (tokens, Some(tok))
                 } else {
-                    tracing::warn!("no tokenizer specified — using dummy token");
+                    tracing::warn!("no tokenizer specified or found — using dummy token; pass --tokenizer <path>");
                     (vec![151644], None) // <|im_start|>
                 };
 
@@ -445,15 +505,29 @@ mod cli {
                     max_seq_len,
                 )?;
 
-                let tok = if let Some(tok_path) = &tokenizer {
-                    Some(oxibonsai_runtime::TokenizerBridge::from_file(tok_path)?)
+                let tok = if let Some(tok_path) = resolve_tokenizer(tokenizer.as_deref(), &model) {
+                    Some(oxibonsai_runtime::TokenizerBridge::from_file(&tok_path)?)
                 } else {
-                    tracing::warn!("no tokenizer specified — token IDs will be printed");
+                    tracing::warn!("no tokenizer specified or found — token IDs will be printed; pass --tokenizer <path>");
                     None
                 };
 
                 println!("OxiBonsai Interactive Chat (type 'quit' or Ctrl-D to exit)");
+                println!("Tip: press Ctrl-C during generation to interrupt output without exiting.");
                 println!("---");
+
+                // Shared cancellation flag.  The ctrlc handler sets this to true;
+                // the generation receive loop checks it and drops the receiver,
+                // which causes tx.send() in generate_streaming_sync to fail and
+                // stop the generation thread naturally.
+                let interrupted = Arc::new(AtomicBool::new(false));
+                {
+                    let flag = Arc::clone(&interrupted);
+                    ctrlc::set_handler(move || {
+                        flag.store(true, Ordering::SeqCst);
+                    })
+                    .map_err(|e| anyhow::anyhow!("failed to install Ctrl-C handler: {e}"))?;
+                }
 
                 let stdin = io::stdin();
                 loop {
@@ -461,13 +535,26 @@ mod cli {
                     io::stdout().flush()?;
 
                     let mut input = String::new();
-                    if stdin.lock().read_line(&mut input)? == 0 {
-                        // EOF
-                        println!();
-                        break;
+                    match stdin.lock().read_line(&mut input) {
+                        Ok(0) => {
+                            // EOF (Ctrl-D)
+                            println!();
+                            break;
+                        }
+                        Ok(_) => {}
+                        Err(e) if e.kind() == io::ErrorKind::Interrupted => {
+                            // Ctrl-C while waiting for input (not during generation).
+                            interrupted.store(false, Ordering::SeqCst);
+                            println!();
+                            eprintln!("[Ctrl-C: type 'quit' or press Ctrl-D to exit]");
+                            continue;
+                        }
+                        Err(e) => return Err(e.into()),
                     }
                     let input = input.trim();
                     if input.is_empty() {
+                        // Reset stale interrupt flag that fired just before the prompt
+                        interrupted.store(false, Ordering::SeqCst);
                         continue;
                     }
                     if input == "quit" || input == "exit" {
@@ -485,10 +572,17 @@ mod cli {
                         vec![151644]
                     };
 
+                    // Clear any stale interrupt before starting generation
+                    interrupted.store(false, Ordering::SeqCst);
+
                     let start = std::time::Instant::now();
                     let (tx, rx) = std::sync::mpsc::channel::<u32>();
 
-                    // Use std::thread::scope so engine's borrow stays valid
+                    // Use std::thread::scope so engine's borrow stays valid.
+                    // The receive loop breaks (dropping rx) when the interrupted flag
+                    // is set; generate_streaming_sync detects tx.send() failure and
+                    // returns cleanly, so gen_handle.join() never blocks indefinitely.
+                    let interrupted_ref = Arc::clone(&interrupted);
                     let output_count = std::thread::scope(|s| -> anyhow::Result<usize> {
                         let thread_tx = tx.clone();
                         let engine_ref = &mut engine;
@@ -500,6 +594,13 @@ mod cli {
 
                         let mut count = 0usize;
                         for token_id in rx {
+                            // Check cancellation before printing each token.
+                            // Breaking here drops the Receiver, which makes the
+                            // next tx.send() in the generation thread return Err,
+                            // stopping generation after at most one more forward pass.
+                            if interrupted_ref.load(Ordering::SeqCst) {
+                                break;
+                            }
                             count += 1;
                             if let Some(tok) = &tok {
                                 let text = tok.decode(&[token_id]).unwrap_or_default();
@@ -512,6 +613,7 @@ mod cli {
                             }
                             let _ = io::stdout().flush();
                         }
+                        // rx is dropped here; gen_handle will stop within one token step
 
                         match gen_handle.join() {
                             Ok(Ok(_)) => {}
@@ -524,17 +626,21 @@ mod cli {
                     let elapsed = start.elapsed();
                     println!(); // newline after streamed output
 
-                    let tok_per_sec = if elapsed.as_secs_f64() > 0.0 {
-                        output_count as f64 / elapsed.as_secs_f64()
+                    if interrupted.swap(false, Ordering::SeqCst) {
+                        eprintln!("[interrupted after {} tokens]", output_count);
                     } else {
-                        0.0
-                    };
-                    eprintln!(
-                        "[{} tokens in {:.2}s, {:.1} tok/s]",
-                        output_count,
-                        elapsed.as_secs_f64(),
-                        tok_per_sec
-                    );
+                        let tok_per_sec = if elapsed.as_secs_f64() > 0.0 {
+                            output_count as f64 / elapsed.as_secs_f64()
+                        } else {
+                            0.0
+                        };
+                        eprintln!(
+                            "[{} tokens in {:.2}s, {:.1} tok/s]",
+                            output_count,
+                            elapsed.as_secs_f64(),
+                            tok_per_sec
+                        );
+                    }
                 }
             }
 
@@ -562,9 +668,8 @@ mod cli {
                     oxibonsai_runtime::InferenceEngine::from_gguf(gguf, params, 42, max_seq_len)?;
                 engine.set_metrics(Arc::clone(&metrics));
 
-                let tok = tokenizer
-                    .as_ref()
-                    .map(|p| oxibonsai_runtime::TokenizerBridge::from_file(p))
+                let tok = resolve_tokenizer(tokenizer.as_deref(), &model)
+                    .map(|p| oxibonsai_runtime::TokenizerBridge::from_file(&p))
                     .transpose()?;
 
                 let router =
@@ -800,6 +905,73 @@ mod cli {
                     }
                 }
             }
+
+            Commands::Tokenizer { cmd: tok_cmd } => match tok_cmd {
+                TokenizerCmd::Download { output, repo, force } => {
+                    let out_path = std::path::Path::new(&output);
+                    if out_path.exists() && !force {
+                        println!("tokenizer.json already exists at {output}");
+                        println!("Use --force to overwrite.");
+                        return Ok(());
+                    }
+                    if let Some(parent) = out_path.parent() {
+                        if !parent.as_os_str().is_empty() {
+                            std::fs::create_dir_all(parent).map_err(|e| {
+                                anyhow::anyhow!("failed to create directory {}: {e}", parent.display())
+                            })?;
+                        }
+                    }
+                    let url = format!(
+                        "https://huggingface.co/{repo}/resolve/main/tokenizer.json"
+                    );
+                    println!("Downloading tokenizer.json from {url}");
+                    let response = reqwest::blocking::get(&url)
+                        .map_err(|e| anyhow::anyhow!("HTTP request failed: {e}"))?;
+                    if !response.status().is_success() {
+                        anyhow::bail!(
+                            "server returned {} for {url}",
+                            response.status()
+                        );
+                    }
+                    let bytes = response.bytes()
+                        .map_err(|e| anyhow::anyhow!("failed to read response body: {e}"))?;
+                    std::fs::write(out_path, &bytes)
+                        .map_err(|e| anyhow::anyhow!("failed to write {output}: {e}"))?;
+                    println!(
+                        "Saved to {output} ({} KB)",
+                        bytes.len() / 1024
+                    );
+                }
+
+                TokenizerCmd::Info { path } => {
+                    let data = std::fs::read_to_string(&path)
+                        .map_err(|e| anyhow::anyhow!("cannot read {path}: {e}"))?;
+                    let v: serde_json::Value = serde_json::from_str(&data)
+                        .map_err(|e| anyhow::anyhow!("invalid JSON in {path}: {e}"))?;
+                    let model_type = v.get("model")
+                        .and_then(|m| m.get("type"))
+                        .and_then(|t| t.as_str())
+                        .unwrap_or("unknown");
+                    let vocab_size = v.get("model")
+                        .and_then(|m| m.get("vocab"))
+                        .map(|vocab| {
+                            if let Some(obj) = vocab.as_object() {
+                                obj.len()
+                            } else {
+                                0
+                            }
+                        })
+                        .unwrap_or(0);
+                    let added_tokens = v.get("added_tokens")
+                        .and_then(|t| t.as_array())
+                        .map(|a| a.len())
+                        .unwrap_or(0);
+                    println!("Tokenizer: {path}");
+                    println!("  Type:         {model_type}");
+                    println!("  Vocab size:   {vocab_size}");
+                    println!("  Added tokens: {added_tokens}");
+                }
+            },
         }
 
         Ok(())

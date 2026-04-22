@@ -122,22 +122,43 @@ Ternary weights trade roughly +600 MB (at 8B scale) for ~5 additional benchmark 
 
 ## Installation
 
-Add OxiBonsai to your `Cargo.toml`:
+### CLI (recommended for end users)
+
+```bash
+cargo install oxibonsai-cli
+```
+
+This installs the `oxibonsai` binary. Rust 1.86+ required.
+
+### Library (for Rust projects)
 
 ```toml
 [dependencies]
 oxibonsai = "0.1.2"
 ```
 
+### Build from source (for development)
+
+```bash
+git clone https://github.com/cool-japan/oxibonsai
+cd oxibonsai
+cargo build --release
+# binary at: target/release/oxibonsai
+```
+
 ## Quick Start
 
-### 1. Build
+> **If you installed via `cargo install oxibonsai-cli`**, start from Step 2.
+> The `oxibonsai` binary is already on your PATH.
+
+### Step 1 — (source builds only) Build
 
 ```bash
 cargo build --release
+export PATH="$PWD/target/release:$PATH"
 ```
 
-### 2. Get a model
+### Step 2 — Get a model
 
 Pick **one** of the two families (or grab both):
 
@@ -156,7 +177,20 @@ curl -L -o models/Bonsai-8B.gguf \
 > **Ternary prerequisite:** `scripts/download_ternary.sh` uses the
 > HuggingFace `hf` CLI — install with `pip install huggingface_hub`.
 
-### 3. Run inference
+### Step 3 — Get the tokenizer
+
+A tokenizer is required for all inference commands.
+Option B above already downloads it automatically.
+For **Option A** (or `cargo install` users):
+
+```bash
+oxibonsai tokenizer download          # saves to models/tokenizer.json
+```
+
+The tokenizer is pulled from `Qwen/Qwen3-8B` on HuggingFace (~2.7 MB).
+Use `--output` to save elsewhere, `--repo` to use a different HF repo.
+
+### Step 4 — Run inference
 
 ```bash
 # 1-bit Bonsai-8B
