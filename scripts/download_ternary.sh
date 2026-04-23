@@ -32,9 +32,14 @@ if command -v hf >/dev/null 2>&1; then
     HF_CMD="hf"
 elif command -v huggingface-cli >/dev/null 2>&1; then
     HF_CMD="huggingface-cli"
+elif [[ -x "$HOME/.local/bin/hf" ]]; then
+    HF_CMD="$HOME/.local/bin/hf"
+elif [[ -x "$HOME/.local/bin/huggingface-cli" ]]; then
+    HF_CMD="$HOME/.local/bin/huggingface-cli"
 else
     echo "ERROR: hf CLI not found." >&2
     echo "Install it with: pip install huggingface_hub" >&2
+    echo "or add ~/.local/bin to PATH: export PATH=\"\$HOME/.local/bin:\$PATH\"" >&2
     exit 1
 fi
 
@@ -42,14 +47,31 @@ mkdir -p models
 
 LOCAL_DIR="models/${REPO##*/}"  # e.g. models/Ternary-Bonsai-1.7B-unpacked
 
+# On mounted filesystems (e.g. /mnt/g), hf's lock file creation can race.
+# Pre-create lock/cache dirs and use a conservative worker count by default.
+mkdir -p "$LOCAL_DIR/.huggingface/download"
+HF_MAX_WORKERS="${HF_MAX_WORKERS:-1}"
+HF_PARALLEL_ARGS=()
+if "$HF_CMD" download --help 2>&1 | grep -q -- "--max-workers"; then
+    HF_PARALLEL_ARGS=(--max-workers "$HF_MAX_WORKERS")
+else
+    echo "Note: $HF_CMD does not support --max-workers; continuing with CLI defaults." >&2
+fi
+
 # ── Download from HuggingFace ────────────────────────────────────────────────
 echo "Downloading $REPO  (using: $HF_CMD)..."
-"$HF_CMD" download "$REPO" \
-    --local-dir "$LOCAL_DIR" \
+hf_download() {
+    "$HF_CMD" download "$REPO" \
+        --local-dir "$LOCAL_DIR" \
+        "${HF_PARALLEL_ARGS[@]}" \
+        "$@"
+}
+
+# Try single-file layout first, then fallback to sharded layout.
+hf_download \
     "model.safetensors" "model.safetensors.index.json" "config.json" "tokenizer.json" 2>/dev/null || \
-"$HF_CMD" download "$REPO" \
-    --local-dir "$LOCAL_DIR" \
-    --include "model.safetensors*" "config.json" "tokenizer.json"
+hf_download \
+    --include "*.safetensors" "*.safetensors.index.json" "config.json" "tokenizer.json"
 
 # ── Build the converter ──────────────────────────────────────────────────────
 echo "Building converter..."
