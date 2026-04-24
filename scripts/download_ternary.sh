@@ -67,11 +67,29 @@ hf_download() {
         "$@"
 }
 
-# Try single-file layout first, then fallback to sharded layout.
-hf_download \
-    "model.safetensors" "model.safetensors.index.json" "config.json" "tokenizer.json" 2>/dev/null || \
-hf_download \
-    --include "*.safetensors" "*.safetensors.index.json" "config.json" "tokenizer.json"
+# Download metadata files first (always present).
+hf_download "model.safetensors.index.json" "config.json" "tokenizer.json" 2>/dev/null || \
+hf_download --include "*.safetensors.index.json" --include "config.json" --include "tokenizer.json"
+
+# If a shard index exists, download each shard listed in it; otherwise try single-file.
+INDEX_FILE="$LOCAL_DIR/model.safetensors.index.json"
+if [[ -f "$INDEX_FILE" ]]; then
+    # Sharded layout: collect unique shard filenames from the weight_map.
+    SHARDS=$(python3 -c "
+import json, sys
+with open('$INDEX_FILE') as f:
+    d = json.load(f)
+print('\n'.join(sorted(set(d['weight_map'].values()))))
+")
+    echo "Downloading $(echo "$SHARDS" | wc -l | tr -d ' ') shard(s)..."
+    while IFS= read -r shard; do
+        echo "  $shard"
+        hf_download "$shard"
+    done <<< "$SHARDS"
+else
+    # Single-file layout.
+    hf_download "model.safetensors"
+fi
 
 # ── Build the converter ──────────────────────────────────────────────────────
 echo "Building converter..."

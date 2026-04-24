@@ -202,6 +202,42 @@
 - [x] **`scripts/download_ternary.sh`** — HF `hf` CLI fetch + safetensors → GGUF conversion wrapper
 - [x] **Measured** — ~50 tok/s (best ~57) on Ternary-Bonsai-1.7B on Apple Silicon (M-series), ~13× speedup vs the per-GEMV dispatch of Phase 11
 
+## Phase 13.y — Ternary LM head on GPU (Metal + CUDA) — Branch 0.1.3
+
+Closes all 7 `OutputWeight::Ternary(_)` CPU-fallback guard sites in `crates/oxibonsai-model/src/model/types.rs`.
+
+### Milestone 1 — Metal ternary LM head (4 guard sites)
+
+- [~] Pre-split `model/types.rs` (1857 lines → >2000 after M1 additions) via `splitrs` (planned 2026-04-24)
+  - **Goal:** Keep every file under 2000 lines. Split into `types.rs` + `types_gpu_cache.rs` + `types_forward_metal.rs`.
+  - **Files:** `crates/oxibonsai-model/src/model/types.rs` and the two new split files.
+  - **Tests:** `cargo nextest run -p oxibonsai-model --all-features` green after split.
+
+- [~] Add `MetalGraph::encode_tail_and_commit_ternary` + update `encode_full_forward_ternary` routing + update `try_metal_full_forward_ternary` LM-head upload (planned 2026-04-24)
+  - **Goal:** Kernel-layer ternary LM head support. `encode_tail_and_commit_ternary` mirrors `encode_tail_and_commit` but uses `dispatch_gemv_tq2` at the LM-head GEMV site. `encode_full_forward_ternary` routes to it. `try_metal_full_forward_ternary` uploads via `get_or_upload_tq2_weight_soa` with namespace `4_000_000+`.
+  - **Files:** `crates/oxibonsai-kernels/src/gpu_backend/metal_full_layer/functions_2.rs`, `functions_3.rs`, `metal_graph.rs` (test).
+  - **Tests:** `test_encode_tail_ternary_matches_reference` — hidden=128, vocab=256, bit-exact token + logits within 1e-3.
+  - **Risk:** `MetalWeightHandle` is type-erased — parallel encoder (not branch-on-kind) is required; plan enforces this.
+
+- [~] Extend `CachedModelWeights` + remove short-circuit + wire ternary cache builder + remove 4 Metal guards (planned 2026-04-24)
+  - **Goal:** Model-layer: extend `CachedModelWeights` to hold ternary state; remove `L1183–1185` short-circuit; finish the partially-wired ternary cache builder at `model/types.rs:L423–460`; remove Err returns at L513–521, L780–788, L940–948, L1116–1124; add ternary prefill/verify/greedy wrapper entries in `functions_3.rs`.
+  - **Files:** `crates/oxibonsai-model/src/model/types.rs` (post-split equivalents); `crates/oxibonsai-kernels/src/gpu_backend/metal_full_layer/functions_3.rs`.
+  - **Tests:** CPU vs Metal greedy-decode byte-diff on Ternary-Bonsai-1.7B (temp=0, seed=42). Throughput check via `./scripts/bench_ternary.sh`.
+  - **Risk:** Lifetime management for `FullForwardLayerParamsTernary<'static>` — mirror the existing Q1 `Box::leak` trick exactly.
+
+### Milestone 2 — CUDA ternary full-forward (3 guard sites)
+
+- [~] Pre-split `cuda_full_layer.rs` (1687 lines → >2000 after M2 additions) via `splitrs` (planned 2026-04-24)
+  - **Goal:** Split into `cuda_full_layer/mod.rs` + `encode_q1.rs` + `encode_ternary.rs` (new, M2 target).
+  - **Files:** `crates/oxibonsai-kernels/src/gpu_backend/cuda_full_layer.rs` → directory.
+  - **Tests:** `cargo check --features cuda` green (execution gated by CI-GPU).
+
+- [~] Implement CUDA ternary full-forward path (planned 2026-04-24)
+  - **Goal:** `encode_layer_into_ternary` (14 dispatches/layer, same split-dispatch shape as Metal Phase 13.x), `encode_full_forward_ternary`, `encode_lm_head_gemv_ternary` (single `launch_gemv_tq2_v1`), `try_cuda_full_forward_ternary` + `try_cuda_full_forward_ternary_with_gpu_lm_head`. Remove 3 CUDA guards at L1453–1461, L1522–1531, L1622–1630.
+  - **Files:** `crates/oxibonsai-kernels/src/gpu_backend/cuda_full_layer/encode_ternary.rs` (new); `cuda_graph/cudagraph_encoding_ternary.rs` (new); `crates/oxibonsai-model/src/model/types.rs` post-split.
+  - **Tests:** `test_encode_lm_head_gemv_ternary_matches_reference`, `test_encode_full_forward_ternary_matches_reference` (2-layer synthetic, 2+ decoded tokens for capture+replay). **CI-GPU-gated** — structurally valid locally, correctness verified on CUDA hardware.
+  - **Risk:** `CuGraphHolder` captured-graph pattern — capture+replay must be tested end-to-end, not just isolated kernel launches. If no CI-GPU pipeline, document as post-merge validation on CUDA hardware.
+
 ## Performance Targets
 
 | Platform | Target | Status |
