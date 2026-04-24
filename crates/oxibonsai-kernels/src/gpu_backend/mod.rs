@@ -96,8 +96,10 @@ pub use cuda_graph::{try_cuda_ffn, try_cuda_qkv, CudaGraph, CudaGraphError, Nati
     any(target_os = "linux", target_os = "windows")
 ))]
 pub use cuda_full_layer::{
-    try_cuda_full_forward, try_cuda_full_forward_with_gpu_lm_head, try_cuda_full_layer,
-    CudaCachedLayerWeights, CudaFullForwardLayerParams,
+    try_cuda_full_forward, try_cuda_full_forward_ternary,
+    try_cuda_full_forward_ternary_with_gpu_lm_head, try_cuda_full_forward_with_gpu_lm_head,
+    try_cuda_full_layer, CudaCachedLayerWeights, CudaFullForwardLayerParams,
+    CudaFullForwardLayerParamsTernary,
 };
 
 #[cfg(all(

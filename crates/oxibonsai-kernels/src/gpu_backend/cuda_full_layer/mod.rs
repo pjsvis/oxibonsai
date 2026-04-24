@@ -786,6 +786,16 @@ pub use encode_q1::{
 };
 
 // =============================================================================
+// Re-exports from encode_ternary
+// =============================================================================
+
+pub use encode_ternary::{
+    encode_full_forward_ternary, encode_layer_into_ternary, encode_lm_head_gemv_ternary,
+    try_cuda_full_forward_ternary, try_cuda_full_forward_ternary_with_gpu_lm_head,
+    CudaFullForwardLayerParamsTernary,
+};
+
+// =============================================================================
 // Tests
 // =============================================================================
 

@@ -1,7 +1,7 @@
 //! CUDA GPU forward-pass methods for `BonsaiModel`.
 
 use super::{BonsaiModel, OutputWeight};
-use crate::block::blocks_as_bytes;
+use crate::block::{blocks_as_bytes, blocks_as_bytes_ternary};
 
 impl<'a> BonsaiModel<'a> {
     /// Get or build the cached per-layer QKV byte concatenations for the CUDA path.
@@ -115,6 +115,107 @@ impl<'a> BonsaiModel<'a> {
         Ok(layer_params)
     }
 
+    /// Build per-layer ternary QKV byte concatenations for the CUDA ternary path.
+    ///
+    /// Each layer's Q, K, V TQ2 block bytes are concatenated in that order.
+    /// Built fresh on each call (no caching needed — the GPU weight cache handles
+    /// upload deduplication via handle IDs).
+    #[cfg(all(
+        feature = "native-cuda",
+        any(target_os = "linux", target_os = "windows")
+    ))]
+    fn build_cuda_ternary_qkv_concats(&self) -> Result<Vec<Vec<u8>>, Box<dyn std::error::Error>> {
+        let n_layers = self.blocks.len();
+        let mut qkv_concats: Vec<Vec<u8>> = Vec::with_capacity(n_layers);
+        for block in &self.blocks {
+            let q_bytes = blocks_as_bytes_ternary(
+                block
+                    .attn_q_blocks_ternary()
+                    .ok_or("attn_q: not a ternary layer")?,
+            );
+            let k_bytes = blocks_as_bytes_ternary(
+                block
+                    .attn_k_blocks_ternary()
+                    .ok_or("attn_k: not a ternary layer")?,
+            );
+            let v_bytes = blocks_as_bytes_ternary(
+                block
+                    .attn_v_blocks_ternary()
+                    .ok_or("attn_v: not a ternary layer")?,
+            );
+            let mut concat = Vec::with_capacity(q_bytes.len() + k_bytes.len() + v_bytes.len());
+            concat.extend_from_slice(q_bytes);
+            concat.extend_from_slice(k_bytes);
+            concat.extend_from_slice(v_bytes);
+            qkv_concats.push(concat);
+        }
+        Ok(qkv_concats)
+    }
+
+    /// Build per-layer `CudaFullForwardLayerParamsTernary` for the CUDA ternary path.
+    ///
+    /// Handle namespaces (distinct from Q1 CUDA ranges 1M–4M and CUDA ternary norms 5M):
+    ///   norm    handles: `5_000_000 + layer * 10 + offset`
+    ///   weight  handles: `6_000_000 + layer * 10 + offset`
+    #[cfg(all(
+        feature = "native-cuda",
+        any(target_os = "linux", target_os = "windows")
+    ))]
+    fn build_cuda_ternary_layer_params<'b>(
+        &'b self,
+        qkv_concats: &'b [Vec<u8>],
+    ) -> Result<
+        Vec<oxibonsai_kernels::CudaFullForwardLayerParamsTernary<'b>>,
+        Box<dyn std::error::Error>,
+    > {
+        let n_layers = self.blocks.len();
+        if n_layers == 0 {
+            return Err("no blocks".into());
+        }
+        let mut layer_params: Vec<oxibonsai_kernels::CudaFullForwardLayerParamsTernary<'b>> =
+            Vec::with_capacity(n_layers);
+        for (i, block) in self.blocks.iter().enumerate() {
+            let norm_handle_base = 5_000_000u64 + (block.layer_index() as u64) * 10;
+            let weight_handle_base = 6_000_000u64 + (block.layer_index() as u64) * 10;
+            layer_params.push(oxibonsai_kernels::CudaFullForwardLayerParamsTernary {
+                attn_norm_handle: norm_handle_base,
+                attn_norm_bytes: block.attn_norm_weight(),
+                fused_qkv_handle: weight_handle_base,
+                fused_qkv_bytes: &qkv_concats[i],
+                q_norm_handle: norm_handle_base + 1,
+                q_norm_bytes: block.q_norm_weight(),
+                k_norm_handle: norm_handle_base + 2,
+                k_norm_bytes: block.k_norm_weight(),
+                attn_proj_handle: weight_handle_base + 1,
+                attn_proj_bytes: blocks_as_bytes_ternary(
+                    block
+                        .attn_output_blocks_ternary()
+                        .ok_or("attn_output: not a ternary layer")?,
+                ),
+                ffn_norm_handle: norm_handle_base + 3,
+                ffn_norm_bytes: block.ffn_norm_weight(),
+                gate_up_handle: weight_handle_base + 2,
+                gate_bytes: blocks_as_bytes_ternary(
+                    block
+                        .ffn_gate_blocks_ternary()
+                        .ok_or("ffn_gate: not a ternary layer")?,
+                ),
+                up_bytes: blocks_as_bytes_ternary(
+                    block
+                        .ffn_up_blocks_ternary()
+                        .ok_or("ffn_up: not a ternary layer")?,
+                ),
+                down_handle: weight_handle_base + 3,
+                down_bytes: blocks_as_bytes_ternary(
+                    block
+                        .ffn_down_blocks_ternary()
+                        .ok_or("ffn_down: not a ternary layer")?,
+                ),
+            });
+        }
+        Ok(layer_params)
+    }
+
     /// Attempt to run all transformer layers (layers only, no LM head) on CUDA GPU.
     ///
     /// On success, returns the post-layers hidden state as a `Vec<f32>` which the
@@ -186,11 +287,60 @@ impl<'a> BonsaiModel<'a> {
         if n_layers == 0 {
             return Err("no blocks".into());
         }
+
+        // ── Ternary path ──────────────────────────────────────────────────────
+        if let OutputWeight::Ternary(ref lm_head_ternary) = self.output_weight {
+            let eps = self.blocks[0].attn_norm_eps();
+            let h = self.config.hidden_size;
+            let inter = self.config.intermediate_size;
+            let nq = self.config.num_attention_heads;
+            let nkv = self.config.num_kv_heads;
+            let hd = self.config.head_dim;
+            let heads_per_group = if nkv > 0 { nq / nkv } else { 1 };
+            let max_seq_len = self.kv_cache.max_seq_len();
+            let final_norm_handle = 5_900_000u64;
+            let final_norm_bytes = self.output_norm.weight();
+            let lm_head_handle = 7_000_000u64;
+            let lm_head_bytes = blocks_as_bytes_ternary(lm_head_ternary.blocks());
+            let vocab_size = lm_head_ternary.out_features();
+            let qkv_concats = self.build_cuda_ternary_qkv_concats()?;
+            let layer_params = self.build_cuda_ternary_layer_params(&qkv_concats)?;
+            let rope_cos = self.rope.cos_at(pos);
+            let rope_sin = self.rope.sin_at(pos);
+            return match oxibonsai_kernels::try_cuda_full_forward_ternary_with_gpu_lm_head(
+                hidden,
+                &layer_params,
+                rope_cos,
+                rope_sin,
+                pos,
+                nq,
+                nkv,
+                hd,
+                heads_per_group,
+                eps,
+                h,
+                inter,
+                max_seq_len,
+                Some(final_norm_bytes),
+                final_norm_handle,
+                lm_head_handle,
+                lm_head_bytes,
+                vocab_size,
+            ) {
+                Some(gpu_logits) => Ok(gpu_logits),
+                None => {
+                    tracing::warn!(
+                        "CUDA ternary full-forward+gpu_lm_head returned None, falling back"
+                    );
+                    Err("CUDA ternary full-forward+gpu_lm_head returned None".into())
+                }
+            };
+        }
+
+        // ── Q1 path ───────────────────────────────────────────────────────────
         let lm_head_linear = match &self.output_weight {
             OutputWeight::OneBit(linear) => linear,
-            OutputWeight::Ternary(_) => {
-                return Err("ternary LM head not supported on CUDA fused GPU path".into());
-            }
+            OutputWeight::Ternary(_) => unreachable!("handled above"),
             OutputWeight::Fp32 { .. } => {
                 return Err("FP32 LM head not supported on CUDA fused GPU path".into());
             }
@@ -257,11 +407,17 @@ impl<'a> BonsaiModel<'a> {
         if n_layers == 0 {
             return Err("no blocks".into());
         }
+        // Ternary batch prefill: no CUDA batch ternary prefill kernel exists yet.
+        // Fall back to sequential single-token ternary forward (same approach as Metal).
+        if matches!(&self.output_weight, OutputWeight::Ternary(_)) {
+            return Err(
+                "ternary CUDA batch prefill not yet implemented; using sequential GPU path".into(),
+            );
+        }
+
         let lm_head_linear = match &self.output_weight {
             OutputWeight::OneBit(linear) => linear,
-            OutputWeight::Ternary(_) => {
-                return Err("ternary LM head not supported on CUDA prefill path".into());
-            }
+            OutputWeight::Ternary(_) => unreachable!("handled above"),
             OutputWeight::Fp32 { .. } => {
                 return Err("FP32 LM head not supported on CUDA prefill path".into());
             }
@@ -357,11 +513,18 @@ impl<'a> BonsaiModel<'a> {
         if n_layers == 0 {
             return Err("no blocks".into());
         }
+        // Ternary batch prefill verify: no CUDA batch ternary prefill-verify kernel exists yet.
+        // Fall back to sequential single-token ternary forward (same approach as Metal).
+        if matches!(&self.output_weight, OutputWeight::Ternary(_)) {
+            return Err(
+                "ternary CUDA batch prefill verify not yet implemented; using sequential GPU path"
+                    .into(),
+            );
+        }
+
         let lm_head_linear = match &self.output_weight {
             OutputWeight::OneBit(linear) => linear,
-            OutputWeight::Ternary(_) => {
-                return Err("ternary LM head not supported on CUDA prefill verify path".into());
-            }
+            OutputWeight::Ternary(_) => unreachable!("handled above"),
             OutputWeight::Fp32 { .. } => {
                 return Err("FP32 LM head not supported on CUDA prefill verify path".into());
             }
