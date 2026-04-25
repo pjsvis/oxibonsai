@@ -32,7 +32,19 @@ Thumbs.db
 # DL models
 models/*
 
-# Local working directories (briefs, debriefs, playbooks)
+# Briefs and debriefs (tracked in git)
 briefs/
 debriefs/
+
+# Playbooks (tracked in git)
 playbooks/
+
+# Local working directories
+.todos/
+.sidecar/
+.sidecar-agent
+.sidecar-task
+.sidecar-pr
+.sidecar-start.sh
+.sidecar-base
+.td-root

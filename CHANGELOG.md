@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- CLI now honors `[sampling]` TOML config section (previously silently discarded)
+- New `--repetition-penalty` flag for `run` and `chat` commands (validates `>= 1.0`)
+- Precedence chain implemented: `defaults < TOML < CLI` for all sampling params
+- `tests/sampling_config_overrides.rs` — 10 tests for precedence chain
+- `playbooks/justfile-scripts-playbook.md` — Justfile/Scripts architecture guide
+
+### Changed
+- `temperature`, `top_k`, `top_p`, `max_tokens` CLI flags now properly override TOML values
+- Justfile refactored as pure facade delegating to `scripts/*.sh`
+
+### Fixed
+- Repetition penalty was hardcoded to `1.1` ignoring TOML config
+- Justfile parser issues with dots in variable/recipe names (resolved with underscore naming)
+
+
 ## [0.1.2] - 2026-04-19
 
 ### Added
