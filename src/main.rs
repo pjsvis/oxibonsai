@@ -16,6 +16,10 @@ mod cli {
     use std::sync::Arc;
 
     use oxibonsai_runtime::OxiBonsaiConfig;
+    use oxibonsai_tokenizer::{ChatMessage, ChatTemplateKind};
+
+    /// Default system prompt when none is provided.
+    const DEFAULT_SYSTEM_PROMPT: &str = "You are a helpful assistant.";
 
     /// Validate that repetition_penalty is >= 1.0 (1.0 = disabled).
     fn repetition_penalty_parser(s: &str) -> Result<f32, String> {
@@ -77,10 +81,13 @@ mod cli {
             #[arg(long, value_parser = repetition_penalty_parser)]
             repetition_penalty: Option<f32>,
 
+            /// System prompt for chat template. Omit to use default.
+            #[arg(long)]
+            system: Option<String>,
+
             /// Random seed.
             #[arg(long, default_value_t = 42)]
             seed: u64,
-
             /// Maximum sequence length (prompt + generated).
             #[arg(long, default_value_t = 4096)]
             max_seq_len: usize,
@@ -115,11 +122,13 @@ mod cli {
             /// Repetition penalty (>= 1.0, 1.0 = disabled). Falls back to TOML config if not set.
             #[arg(long, value_parser = repetition_penalty_parser)]
             repetition_penalty: Option<f32>,
+            /// System prompt for chat template. Omit to use default.
+            #[arg(long)]
+            system: Option<String>,
 
             /// Random seed.
             #[arg(long, default_value_t = 42)]
             seed: u64,
-
             /// Maximum sequence length.
             #[arg(long, default_value_t = 4096)]
             max_seq_len: usize,
@@ -256,6 +265,7 @@ mod cli {
                 top_k,
                 top_p,
                 repetition_penalty,
+                system,
                 seed,
                 max_seq_len,
                 tokenizer,
@@ -273,6 +283,7 @@ mod cli {
                 let top_p = top_p.unwrap_or(s.top_p);
                 let repetition_penalty = repetition_penalty.unwrap_or(s.repetition_penalty);
                 let max_tokens = max_tokens.unwrap_or(s.max_tokens);
+                let system_prompt = system.unwrap_or_else(|| DEFAULT_SYSTEM_PROMPT.to_string());
 
                 tracing::info!(
                     model = %model,
@@ -307,11 +318,19 @@ mod cli {
                 // Tokenize prompt and retain the bridge for streaming decode
                 let (prompt_tokens, tok_bridge) = if let Some(tok_path) = &tokenizer {
                     let tok = oxibonsai_runtime::TokenizerBridge::from_file(tok_path)?;
-                    let tokens = tok.encode(&prompt_text)?;
+                    // Apply Qwen3 chat template
+                    let qwen_msgs = vec![
+                        ChatMessage::system(&system_prompt),
+                        ChatMessage::user(&prompt_text),
+                    ];
+                    let rendered = ChatTemplateKind::Qwen.render_with_generation_prompt(&qwen_msgs);
+                    let tokens = tok.encode(&rendered)?;
                     (tokens, Some(tok))
                 } else {
-                    tracing::warn!("no tokenizer specified — using dummy token");
-                    (vec![151644], None) // <|im_start|>
+                    return Err(anyhow::anyhow!(
+                        "tokenizer is required for Qwen3 chat template. 
+                        Please provide --tokenizer <path/to/tokenizer.json>"
+                    ));
                 };
 
                 tracing::info!(prompt_tokens = prompt_tokens.len(), "prefilling");
@@ -455,6 +474,7 @@ mod cli {
                 top_k,
                 top_p,
                 repetition_penalty,
+                system,
                 seed,
                 max_seq_len,
                 tokenizer,
@@ -466,6 +486,7 @@ mod cli {
                 let top_p = top_p.unwrap_or(s.top_p);
                 let repetition_penalty = repetition_penalty.unwrap_or(s.repetition_penalty);
                 let max_tokens = max_tokens.unwrap_or(s.max_tokens);
+                let mut system_prompt = system.unwrap_or_else(|| DEFAULT_SYSTEM_PROMPT.to_string());
 
                 // Memory-map the GGUF file
                 let mmap =
@@ -490,12 +511,18 @@ mod cli {
                 let tok = if let Some(tok_path) = &tokenizer {
                     Some(oxibonsai_runtime::TokenizerBridge::from_file(tok_path)?)
                 } else {
-                    tracing::warn!("no tokenizer specified — token IDs will be printed");
-                    None
+                    return Err(anyhow::anyhow!(
+                        "tokenizer is required for chat template. Please provide --tokenizer <path>"
+                    ));
                 };
+
+                let tok = tok.unwrap(); // We know it's Some since we returned above
 
                 println!("OxiBonsai Interactive Chat (type 'quit' or Ctrl-D to exit)");
                 println!("---");
+
+                // Conversation history as raw strings (user and assistant turns)
+                let mut history: Vec<(String, String)> = Vec::new();
 
                 let stdin = io::stdin();
                 loop {
@@ -517,21 +544,54 @@ mod cli {
                     }
                     if input == "/reset" {
                         engine.reset();
+                        history.clear();
                         println!("[context cleared]");
                         continue;
                     }
+                    if input == "/help" {
+                        println!("Available commands:");
+                        println!("  /reset          Clear conversation history and reset engine");
+                        println!("  /system [text]  Show current system prompt (no arg) or set new one");
+                        println!("  /help           Show this help message");
+                        continue;
+                    }
+                    if input.starts_with("/system") {
+                        let new_system = input.strip_prefix("/system").map(|s| s.trim());
+                        if let Some(new_prompt) = new_system {
+                            if new_prompt.is_empty() {
+                                println!("Current system prompt: {}", system_prompt);
+                            } else {
+                                system_prompt = new_prompt.to_string();
+                                engine.reset();
+                                history.clear();
+                                println!("[system prompt updated, context cleared]");
+                            }
+                        } else {
+                            println!("Current system prompt: {}", system_prompt);
+                        }
+                        continue;
+                    }
 
-                    let prompt_tokens = if let Some(tok) = &tok {
-                        tok.encode(input)?
-                    } else {
-                        vec![151644]
-                    };
+                    // Build messages with system + history + new user turn
+                    let mut messages = vec![ChatMessage::system(&system_prompt)];
+                    for (role, content) in &history {
+                        if role == "user" {
+                            messages.push(ChatMessage::user(content));
+                        } else {
+                            messages.push(ChatMessage::assistant(content));
+                        }
+                    }
+                    messages.push(ChatMessage::user(input));
+
+                    // Render with Qwen3 template
+                    let rendered = ChatTemplateKind::Qwen.render_with_generation_prompt(&messages);
+                    let prompt_tokens = tok.encode(&rendered)?;
 
                     let start = std::time::Instant::now();
                     let (tx, rx) = std::sync::mpsc::channel::<u32>();
 
                     // Use std::thread::scope so engine's borrow stays valid
-                    let output_count = std::thread::scope(|s| -> anyhow::Result<usize> {
+                    let (output_count, assistant_response) = std::thread::scope(|s| -> anyhow::Result<(usize, String)> {
                         let thread_tx = tx.clone();
                         let engine_ref = &mut engine;
                         let tokens_ref = &prompt_tokens;
@@ -540,18 +600,13 @@ mod cli {
                         });
                         drop(tx);
 
+                        let mut assistant_response = String::new();
                         let mut count = 0usize;
                         for token_id in rx {
                             count += 1;
-                            if let Some(tok) = &tok {
-                                let text = tok.decode(&[token_id]).unwrap_or_default();
-                                print!("{text}");
-                            } else {
-                                if count == 1 {
-                                    print!("Tokens:");
-                                }
-                                print!(" {token_id}");
-                            }
+                            let text = tok.decode(&[token_id]).unwrap_or_default();
+                            assistant_response.push_str(&text);
+                            print!("{text}");
                             let _ = io::stdout().flush();
                         }
 
@@ -560,11 +615,15 @@ mod cli {
                             Ok(Err(e)) => return Err(e.into()),
                             Err(_) => return Err(anyhow::anyhow!("generation thread panicked")),
                         }
-                        Ok(count)
+                        Ok((count, assistant_response))
                     })?;
 
                     let elapsed = start.elapsed();
                     println!(); // newline after streamed output
+
+                    // Add assistant response to history
+                    let response_for_history = assistant_response.trim().to_string();
+                    history.push(("assistant".to_string(), response_for_history));
 
                     let tok_per_sec = if elapsed.as_secs_f64() > 0.0 {
                         output_count as f64 / elapsed.as_secs_f64()
