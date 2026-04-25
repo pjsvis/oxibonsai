@@ -121,6 +121,7 @@ rag = ["oxibonsai-rag"]
 simd-avx2 = ["oxibonsai-kernels/simd-avx2"]
 simd-avx512 = ["oxibonsai-kernels/simd-avx512"]
 simd-neon = ["oxibonsai-kernels/simd-neon"]
+nightly = ["oxibonsai-kernels/nightly"]  # Enable nightly intrinsics (prefetch)
 native-tokenizer = ["dep:oxibonsai-tokenizer"]
 eval = ["dep:oxibonsai-eval"]
 cuda = ["oxibonsai-kernels/cuda"]
