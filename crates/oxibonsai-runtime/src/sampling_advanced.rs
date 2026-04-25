@@ -868,10 +868,10 @@ mod tests {
 
     #[test]
     fn mirostat_v2_returns_valid_index() {
-        let logits = vec![1.0_f32, 5.0, 2.0, 3.0];
+        let mut logits = vec![1.0_f32, 5.0, 2.0, 3.0];
         let mut sampler = MirostatV2Sampler::new(5.0, 0.1);
         let mut rng = LcgRng::new(99);
-        let idx = sampler.sample(&logits, &mut rng);
+        let idx = sampler.sample(&mut logits, &mut rng);
         assert!(idx < logits.len());
     }
 

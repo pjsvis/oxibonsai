@@ -21,11 +21,11 @@ fn greedy_params() -> SamplingParams {
 #[test]
 fn temperature_zero_always_returns_argmax() {
     let params = greedy_params();
-    let mut sampler = Sampler::new(params, 42);
-    let logits = vec![0.1, 0.5, 0.9, 0.3, 0.7];
+    let mut sampler = Sampler::new(params.clone(), 42);
+    let mut logits = vec![0.1, 0.5, 0.9, 0.3, 0.7];
 
     for _ in 0..20 {
-        let token = sampler.sample(&logits).expect("should sample");
+        let token = sampler.sample(&mut logits).expect("should sample");
         assert_eq!(
             token, 2,
             "temperature=0 should always pick index 2 (max=0.9)"
@@ -36,20 +36,20 @@ fn temperature_zero_always_returns_argmax() {
 #[test]
 fn temperature_zero_with_negative_logits() {
     let params = greedy_params();
-    let mut sampler = Sampler::new(params, 42);
-    let logits = vec![-10.0, -5.0, -1.0, -20.0];
+    let mut sampler = Sampler::new(params.clone(), 42);
+    let mut logits = vec![-10.0, -5.0, -1.0, -20.0];
 
-    let token = sampler.sample(&logits).expect("should sample");
+    let token = sampler.sample(&mut logits).expect("should sample");
     assert_eq!(token, 2, "should pick -1.0 as the max");
 }
 
 #[test]
 fn temperature_zero_with_ties_returns_a_maximum() {
     let params = greedy_params();
-    let mut sampler = Sampler::new(params, 42);
-    let logits = vec![1.0, 1.0, 1.0];
+    let mut sampler = Sampler::new(params.clone(), 42);
+    let mut logits = vec![1.0, 1.0, 1.0];
 
-    let token = sampler.sample(&logits).expect("should sample");
+    let token = sampler.sample(&mut logits).expect("should sample");
     // argmax picks one of the tied maximum values
     assert!(token < 3, "should return a valid index among tied maxima");
     // The value at the selected index should be the maximum
@@ -72,13 +72,13 @@ fn temperature_1_samples_from_distribution() {
         repetition_penalty: 1.0,
         max_tokens: 128,
     };
-    let mut sampler = Sampler::new(params, 12345);
+    let mut sampler = Sampler::new(params.clone(), 12345);
     // With a peaked distribution, most samples should be the max
-    let logits = vec![0.0, 0.0, 10.0, 0.0, 0.0];
+    let mut logits = vec![0.0, 0.0, 10.0, 0.0, 0.0];
 
     let mut count_2 = 0;
     for _ in 0..100 {
-        let token = sampler.sample(&logits).expect("should sample");
+        let token = sampler.sample(&mut logits).expect("should sample");
         assert!((token as usize) < 5);
         if token == 2 {
             count_2 += 1;
@@ -103,11 +103,11 @@ fn top_k_1_always_returns_top_element() {
         repetition_penalty: 1.0,
         max_tokens: 128,
     };
-    let mut sampler = Sampler::new(params, 42);
-    let logits = vec![0.1, 0.9, 0.5, 0.3];
+    let mut sampler = Sampler::new(params.clone(), 42);
+    let mut logits = vec![0.1, 0.9, 0.5, 0.3];
 
     for _ in 0..20 {
-        let token = sampler.sample(&logits).expect("should sample");
+        let token = sampler.sample(&mut logits).expect("should sample");
         assert_eq!(token, 1, "top_k=1 should always pick max (index 1)");
     }
 }
@@ -121,12 +121,12 @@ fn top_k_reduces_candidate_set() {
         repetition_penalty: 1.0,
         max_tokens: 128,
     };
-    let mut sampler = Sampler::new(params, 42);
+    let mut sampler = Sampler::new(params.clone(), 42);
     // logits: indices 2 and 4 are the top 2
-    let logits = vec![0.0, 0.0, 10.0, 0.0, 9.0];
+    let mut logits = vec![0.0, 0.0, 10.0, 0.0, 9.0];
 
     for _ in 0..100 {
-        let token = sampler.sample(&logits).expect("should sample");
+        let token = sampler.sample(&mut logits).expect("should sample");
         assert!(
             token == 2 || token == 4,
             "top_k=2 should only sample from top 2, got {token}"
@@ -147,11 +147,11 @@ fn top_p_near_zero_returns_top_element() {
         repetition_penalty: 1.0,
         max_tokens: 128,
     };
-    let mut sampler = Sampler::new(params, 42);
-    let logits = vec![0.0, 0.0, 10.0, 0.0, 0.0];
+    let mut sampler = Sampler::new(params.clone(), 42);
+    let mut logits = vec![0.0, 0.0, 10.0, 0.0, 0.0];
 
     for _ in 0..20 {
-        let token = sampler.sample(&logits).expect("should sample");
+        let token = sampler.sample(&mut logits).expect("should sample");
         assert_eq!(token, 2, "very low top_p should pick the peak");
     }
 }
@@ -165,13 +165,13 @@ fn top_p_1_considers_all_tokens() {
         repetition_penalty: 1.0,
         max_tokens: 128,
     };
-    let mut sampler = Sampler::new(params, 42);
+    let mut sampler = Sampler::new(params.clone(), 42);
     // Uniform logits
     let logits = [1.0; 10];
 
     let mut seen = [false; 10];
     for _ in 0..500 {
-        let token = sampler.sample(&logits).expect("should sample") as usize;
+        let token = sampler.sample(&mut logits).expect("should sample") as usize;
         if token < 10 {
             seen[token] = true;
         }
@@ -203,12 +203,12 @@ fn repetition_penalty_1_has_no_effect() {
         repetition_penalty: 1.0,
         max_tokens: 128,
     };
-    let mut s1 = Sampler::new(params1, 42);
-    let mut s2 = Sampler::new(params2, 42);
-    let logits = vec![0.1, 0.5, 0.9, 0.3];
+    let mut s1 = Sampler::new(params.clone(), 42);
+    let mut s2 = Sampler::new(params.clone(), 42);
+    let mut logits = vec![0.1, 0.5, 0.9, 0.3];
 
-    let t1 = s1.sample(&logits).expect("s1");
-    let t2 = s2.sample(&logits).expect("s2");
+    let t1 = s1.sample(&mut logits).expect("s1");
+    let t2 = s2.sample(&mut logits).expect("s2");
     assert_eq!(t1, t2, "penalty=1.0 should have no effect");
 }
 
@@ -225,10 +225,10 @@ fn very_large_logits_no_overflow() {
         repetition_penalty: 1.0,
         max_tokens: 128,
     };
-    let mut sampler = Sampler::new(params, 42);
-    let logits = vec![1000.0, 999.0, 998.0];
+    let mut sampler = Sampler::new(params.clone(), 42);
+    let mut logits = vec![1000.0, 999.0, 998.0];
 
-    let token = sampler.sample(&logits).expect("should not overflow");
+    let token = sampler.sample(&mut logits).expect("should not overflow");
     assert!(token < 3, "should return valid index");
 }
 
@@ -238,30 +238,30 @@ fn all_negative_logits() {
         temperature: 0.0,
         ..Default::default()
     };
-    let mut sampler = Sampler::new(params, 42);
-    let logits = vec![-100.0, -50.0, -200.0];
+    let mut sampler = Sampler::new(params.clone(), 42);
+    let mut logits = vec![-100.0, -50.0, -200.0];
 
-    let token = sampler.sample(&logits).expect("should handle negatives");
+    let token = sampler.sample(&mut logits).expect("should handle negatives");
     assert_eq!(token, 1, "should pick -50.0 as the max");
 }
 
 #[test]
 fn empty_logits_returns_zero() {
     let params = SamplingParams::default();
-    let mut sampler = Sampler::new(params, 42);
+    let mut sampler = Sampler::new(params.clone(), 42);
     let logits: Vec<f32> = vec![];
 
-    let token = sampler.sample(&logits).expect("empty should return 0");
+    let token = sampler.sample(&mut logits).expect("empty should return 0");
     assert_eq!(token, 0);
 }
 
 #[test]
 fn single_logit() {
     let params = SamplingParams::default();
-    let mut sampler = Sampler::new(params, 42);
-    let logits = vec![42.0];
+    let mut sampler = Sampler::new(params.clone(), 42);
+    let mut logits = vec![42.0];
 
-    let token = sampler.sample(&logits).expect("single should work");
+    let token = sampler.sample(&mut logits).expect("single should work");
     assert_eq!(token, 0);
 }
 
@@ -278,15 +278,15 @@ fn statistical_distribution_roughly_correct() {
         repetition_penalty: 1.0,
         max_tokens: 128,
     };
-    let mut sampler = Sampler::new(params, 42);
+    let mut sampler = Sampler::new(params.clone(), 42);
 
     // Two logits: 0.0 and 0.0 -> equal probability
-    let logits = vec![0.0, 0.0];
+    let mut logits = vec![0.0, 0.0];
     let n = 1000;
     let mut counts = [0usize; 2];
 
     for _ in 0..n {
-        let token = sampler.sample(&logits).expect("should sample") as usize;
+        let token = sampler.sample(&mut logits).expect("should sample") as usize;
         if token < 2 {
             counts[token] += 1;
         }
@@ -323,7 +323,7 @@ fn sampler_params_accessible() {
         repetition_penalty: 1.2,
         max_tokens: 128,
     };
-    let sampler = Sampler::new(params, 42);
+    let sampler = Sampler::new(params.clone(), 42);
     let p = sampler.params();
     assert!((p.temperature - 0.5).abs() < f32::EPSILON);
     assert_eq!(p.top_k, 10);

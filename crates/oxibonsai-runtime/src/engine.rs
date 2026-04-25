@@ -282,7 +282,7 @@ impl<'a> InferenceEngine<'a> {
             let step_start = std::time::Instant::now();
 
             // Sample next token
-            let next_token = self.sampler.sample(&last_logits)?;
+            let next_token = self.sampler.sample(&mut last_logits)?;
 
             // Check for EOS
             if next_token == EOS_TOKEN_ID {
@@ -376,7 +376,7 @@ impl<'a> InferenceEngine<'a> {
 
         for (pos, _) in (prompt_tokens.len()..).zip(0..max_tokens) {
             let step_start = std::time::Instant::now();
-            let next_token = self.sampler.sample(&logits)?;
+            let next_token = self.sampler.sample(&mut logits)?;
 
             if next_token == EOS_TOKEN_ID {
                 tracing::debug!(pos, "EOS token generated (streaming)");
@@ -447,7 +447,7 @@ impl<'a> InferenceEngine<'a> {
         for (pos, _) in (prompt_tokens.len()..).zip(0..max_tokens) {
             let step_start = std::time::Instant::now();
 
-            let next_token = self.sampler.sample(&logits)?;
+            let next_token = self.sampler.sample(&mut logits)?;
 
             if next_token == EOS_TOKEN_ID {
                 tracing::debug!(pos, "EOS token generated (streaming_sync)");

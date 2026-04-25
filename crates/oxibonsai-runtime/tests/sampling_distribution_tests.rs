@@ -75,7 +75,7 @@ fn count_distinct(values: &[u32]) -> usize {
 
 #[test]
 fn temperature_1_distribution_matches_softmax() {
-    let logits = vec![10.0_f32, 5.0, 1.0, 0.0];
+    let mut logits = vec![10.0_f32, 5.0, 1.0, 0.0];
     let expected = softmax_probs(&logits, 1.0);
     let n = 5000;
 
@@ -91,7 +91,7 @@ fn temperature_1_distribution_matches_softmax() {
     let mut counts = [0_usize; 4];
 
     for _ in 0..n {
-        let token = sampler.sample(&logits).expect("sampling should succeed") as usize;
+        let token = sampler.sample(&mut logits).expect("sampling should succeed") as usize;
         assert!(token < 4, "token index out of range: {token}");
         counts[token] += 1;
     }
@@ -107,7 +107,7 @@ fn temperature_1_distribution_matches_softmax() {
 
 #[test]
 fn temperature_1_token_0_most_frequent() {
-    let logits = vec![10.0_f32, 5.0, 1.0, 0.0];
+    let mut logits = vec![10.0_f32, 5.0, 1.0, 0.0];
     let n = 2000;
 
     let params = SamplingParams {
@@ -122,7 +122,7 @@ fn temperature_1_token_0_most_frequent() {
     let mut counts = [0_usize; 4];
 
     for _ in 0..n {
-        let token = sampler.sample(&logits).expect("sampling should succeed") as usize;
+        let token = sampler.sample(&mut logits).expect("sampling should succeed") as usize;
         counts[token] += 1;
     }
 
@@ -143,7 +143,7 @@ fn temperature_1_token_0_most_frequent() {
 
 #[test]
 fn temperature_zero_always_greedy() {
-    let logits = vec![10.0_f32, 5.0, 1.0, 0.0];
+    let mut logits = vec![10.0_f32, 5.0, 1.0, 0.0];
     let n = 1000;
 
     let params = SamplingParams {
@@ -158,7 +158,7 @@ fn temperature_zero_always_greedy() {
 
     for _ in 0..n {
         let token = sampler
-            .sample(&logits)
+            .sample(&mut logits)
             .expect("greedy sampling should succeed");
         assert_eq!(
             token, 0,
@@ -169,7 +169,7 @@ fn temperature_zero_always_greedy() {
 
 #[test]
 fn temperature_very_high_approaches_uniform() {
-    let logits = vec![10.0_f32, 5.0, 1.0, 0.0];
+    let mut logits = vec![10.0_f32, 5.0, 1.0, 0.0];
     let n = 4000;
 
     let params = SamplingParams {
@@ -185,7 +185,7 @@ fn temperature_very_high_approaches_uniform() {
 
     for _ in 0..n {
         let token = sampler
-            .sample(&logits)
+            .sample(&mut logits)
             .expect("high temp sampling should succeed") as usize;
         counts[token] += 1;
     }
@@ -205,7 +205,7 @@ fn temperature_very_high_approaches_uniform() {
 fn temperature_chi_square_goodness_of_fit() {
     // Test at multiple temperatures
     for temp in [0.5_f32, 1.0, 2.0] {
-        let logits = vec![3.0_f32, 2.0, 1.0, 0.5, 0.1];
+        let mut logits = vec![3.0_f32, 2.0, 1.0, 0.5, 0.1];
         let expected = softmax_probs(&logits, temp);
         let n = 5000;
 
@@ -221,7 +221,7 @@ fn temperature_chi_square_goodness_of_fit() {
         let mut counts = [0_usize; 5];
 
         for _ in 0..n {
-            let token = sampler.sample(&logits).expect("sampling should succeed") as usize;
+            let token = sampler.sample(&mut logits).expect("sampling should succeed") as usize;
             counts[token] += 1;
         }
 
@@ -240,7 +240,7 @@ fn temperature_chi_square_goodness_of_fit() {
 
 #[test]
 fn top_k_1_always_selects_argmax() {
-    let logits = vec![1.0_f32, 5.0, 3.0, 2.0];
+    let mut logits = vec![1.0_f32, 5.0, 3.0, 2.0];
     let n = 1000;
 
     let params = SamplingParams {
@@ -255,7 +255,7 @@ fn top_k_1_always_selects_argmax() {
 
     for _ in 0..n {
         let token = sampler
-            .sample(&logits)
+            .sample(&mut logits)
             .expect("top_k=1 sampling should succeed");
         assert_eq!(
             token, 1,
@@ -267,7 +267,7 @@ fn top_k_1_always_selects_argmax() {
 #[test]
 fn top_k_2_only_selects_top_two() {
     // logits sorted descending: index 1 (5.0), index 2 (3.0), index 3 (2.0), index 0 (1.0)
-    let logits = vec![1.0_f32, 5.0, 3.0, 2.0];
+    let mut logits = vec![1.0_f32, 5.0, 3.0, 2.0];
     let n = 2000;
 
     let params = SamplingParams {
@@ -283,7 +283,7 @@ fn top_k_2_only_selects_top_two() {
 
     for _ in 0..n {
         let token = sampler
-            .sample(&logits)
+            .sample(&mut logits)
             .expect("top_k=2 sampling should succeed") as usize;
         counts[token] += 1;
     }
@@ -309,7 +309,7 @@ fn top_k_2_only_selects_top_two() {
 
 #[test]
 fn top_k_full_vocab_selects_all() {
-    let logits = vec![1.0_f32, 2.0, 3.0, 4.0];
+    let mut logits = vec![1.0_f32, 2.0, 3.0, 4.0];
     let n = 2000;
 
     let params = SamplingParams {
@@ -325,7 +325,7 @@ fn top_k_full_vocab_selects_all() {
 
     for _ in 0..n {
         let token = sampler
-            .sample(&logits)
+            .sample(&mut logits)
             .expect("top_k=vocab sampling should succeed") as usize;
         seen[token] = true;
     }
@@ -341,7 +341,7 @@ fn top_k_full_vocab_selects_all() {
 #[test]
 fn top_k_filtered_tokens_never_appear() {
     // logits: indices sorted descending: 3 (10.0), 0 (5.0), 2 (2.0), 1 (0.1)
-    let logits = vec![5.0_f32, 0.1, 2.0, 10.0];
+    let mut logits = vec![5.0_f32, 0.1, 2.0, 10.0];
     let n = 1000;
 
     let params = SamplingParams {
@@ -356,7 +356,7 @@ fn top_k_filtered_tokens_never_appear() {
 
     for _ in 0..n {
         let token = sampler
-            .sample(&logits)
+            .sample(&mut logits)
             .expect("top_k=2 sampling should succeed") as usize;
         assert!(
             token == 0 || token == 3,
@@ -372,7 +372,7 @@ fn top_k_filtered_tokens_never_appear() {
 #[test]
 fn top_p_small_selects_dominant_token() {
     // logits [10.0, 0.0, 0.0, 0.0] -> softmax: token 0 has ~99.99% of mass
-    let logits = vec![10.0_f32, 0.0, 0.0, 0.0];
+    let mut logits = vec![10.0_f32, 0.0, 0.0, 0.0];
     let n = 1000;
 
     let params = SamplingParams {
@@ -388,7 +388,7 @@ fn top_p_small_selects_dominant_token() {
 
     for _ in 0..n {
         let token = sampler
-            .sample(&logits)
+            .sample(&mut logits)
             .expect("top_p=0.5 sampling should succeed");
         if token == 0 {
             count_0 += 1;
@@ -406,7 +406,7 @@ fn top_p_small_selects_dominant_token() {
 #[test]
 fn top_p_uniform_selects_subset() {
     // Uniform logits: all tokens have equal probability
-    let logits = vec![1.0_f32, 1.0, 1.0, 1.0];
+    let mut logits = vec![1.0_f32, 1.0, 1.0, 1.0];
     let n = 2000;
 
     let params = SamplingParams {
@@ -422,7 +422,7 @@ fn top_p_uniform_selects_subset() {
 
     for _ in 0..n {
         let token = sampler
-            .sample(&logits)
+            .sample(&mut logits)
             .expect("top_p=0.5 uniform sampling should succeed");
         tokens_seen.push(token);
     }
@@ -439,7 +439,7 @@ fn top_p_uniform_selects_subset() {
 
 #[test]
 fn top_p_1_allows_all_tokens() {
-    let logits = vec![1.0_f32, 2.0, 3.0, 4.0, 5.0];
+    let mut logits = vec![1.0_f32, 2.0, 3.0, 4.0, 5.0];
     let n = 3000;
 
     let params = SamplingParams {
@@ -455,7 +455,7 @@ fn top_p_1_allows_all_tokens() {
 
     for _ in 0..n {
         let token = sampler
-            .sample(&logits)
+            .sample(&mut logits)
             .expect("top_p=1.0 sampling should succeed") as usize;
         if token < 5 {
             seen[token] = true;
@@ -475,8 +475,8 @@ fn top_p_1_allows_all_tokens() {
 
 #[test]
 fn repetition_penalty_1_no_effect() {
-    let logits = vec![3.0_f32, 2.0, 1.0, 0.0];
-    let seen_tokens = vec![0_u32, 1, 2, 3];
+    let mut logits = vec![3.0_f32, 2.0, 1.0, 0.0];
+    let mut seen_tokens = vec![0_u32, 1, 2, 3];
 
     let mut logits_penalised = logits.clone();
     apply_repetition_penalty(&mut logits_penalised, &seen_tokens, 1.0);
@@ -489,7 +489,7 @@ fn repetition_penalty_1_no_effect() {
 
 #[test]
 fn repetition_penalty_reduces_seen_token_probability() {
-    let logits = vec![3.0_f32, 3.0, 3.0, 3.0];
+    let mut logits = vec![3.0_f32, 3.0, 3.0, 3.0];
     let n = 3000;
 
     // Without penalty
@@ -506,7 +506,7 @@ fn repetition_penalty_reduces_seen_token_probability() {
 
     for _ in 0..n {
         let token = sampler_no
-            .sample(&logits)
+            .sample(&mut logits)
             .expect("no penalty sampling should succeed") as usize;
         counts_no[token] += 1;
     }
@@ -528,7 +528,7 @@ fn repetition_penalty_reduces_seen_token_probability() {
 
     for _ in 0..n {
         let token = sampler_pen
-            .sample(&logits_penalised)
+            .sample(&mut logits_penalised)
             .expect("penalised sampling should succeed") as usize;
         counts_pen[token] += 1;
     }
@@ -547,8 +547,8 @@ fn repetition_penalty_reduces_seen_token_probability() {
 #[test]
 fn repetition_penalty_statistical_effect() {
     // Create a peaked distribution and penalise the top token
-    let base_logits = vec![5.0_f32, 2.0, 1.0, 0.5];
-    let seen_tokens = vec![0_u32]; // penalise the dominant token
+    let mut base_logits = vec![5.0_f32, 2.0, 1.0, 0.5];
+    let mut seen_tokens = vec![0_u32]; // penalise the dominant token
     let n = 3000;
 
     // Measure frequency without penalty
@@ -565,7 +565,7 @@ fn repetition_penalty_statistical_effect() {
     let mut baseline_count_0 = 0_usize;
     for _ in 0..n {
         let token = sampler_baseline
-            .sample(&base_logits)
+            .sample(&mut base_logits)
             .expect("baseline sampling should succeed");
         if token == 0 {
             baseline_count_0 += 1;
@@ -589,7 +589,7 @@ fn repetition_penalty_statistical_effect() {
     let mut pen_count_0 = 0_usize;
     for _ in 0..n {
         let token = sampler_pen
-            .sample(&penalised)
+            .sample(&mut penalised)
             .expect("penalised sampling should succeed");
         if token == 0 {
             pen_count_0 += 1;
@@ -627,7 +627,7 @@ fn softmax_inplace_distribution_sums_to_one() {
 
 #[test]
 fn apply_temperature_preserves_argmax() {
-    let logits = vec![1.0_f32, 5.0, 3.0, 2.0];
+    let mut logits = vec![1.0_f32, 5.0, 3.0, 2.0];
     for temp in [0.1_f32, 0.5, 1.0, 2.0, 10.0] {
         let mut scaled = logits.clone();
         apply_temperature(&mut scaled, temp);
@@ -691,7 +691,7 @@ fn lcg_rng_deterministic_across_runs() {
 
 #[test]
 fn softmax_probs_helper_matches_inplace() {
-    let logits = vec![3.0_f32, 1.0, 2.0, 0.5];
+    let mut logits = vec![3.0_f32, 1.0, 2.0, 0.5];
     let temp = 1.0;
     let computed = softmax_probs(&logits, temp);
 
@@ -711,7 +711,7 @@ fn softmax_probs_helper_matches_inplace() {
 fn temperature_scaling_flattens_distribution() {
     // At low temperature, the distribution should be more peaked.
     // At high temperature, it should be flatter.
-    let logits = vec![5.0_f32, 2.0, 1.0, 0.0];
+    let mut logits = vec![5.0_f32, 2.0, 1.0, 0.0];
 
     let probs_low = softmax_probs(&logits, 0.1);
     let probs_med = softmax_probs(&logits, 1.0);
@@ -743,7 +743,7 @@ fn temperature_scaling_flattens_distribution() {
 #[test]
 fn top_k_3_excludes_bottom_tokens_statistically() {
     // 5 logits, top_k=3 -> only the 3 highest should be sampled
-    let logits = vec![1.0_f32, 5.0, 3.0, 0.5, 4.0];
+    let mut logits = vec![1.0_f32, 5.0, 3.0, 0.5, 4.0];
     // Sorted desc: index 1 (5.0), index 4 (4.0), index 2 (3.0), index 0 (1.0), index 3 (0.5)
     let n = 2000;
 
@@ -760,7 +760,7 @@ fn top_k_3_excludes_bottom_tokens_statistically() {
 
     for _ in 0..n {
         let token = sampler
-            .sample(&logits)
+            .sample(&mut logits)
             .expect("top_k=3 sampling should succeed") as usize;
         counts[token] += 1;
     }

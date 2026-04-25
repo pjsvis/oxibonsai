@@ -121,7 +121,7 @@ rag = ["oxibonsai-rag"]
 simd-avx2 = ["oxibonsai-kernels/simd-avx2"]
 simd-avx512 = ["oxibonsai-kernels/simd-avx512"]
 simd-neon = ["oxibonsai-kernels/simd-neon"]
-native-tokenizer = ["dep:oxibonsai-tokenizer"]
+native-tokenizer = []
 eval = ["dep:oxibonsai-eval"]
 cuda = ["oxibonsai-kernels/cuda"]
 native-cuda = ["gpu", "oxibonsai-kernels/native-cuda", "oxibonsai-model/native-cuda", "oxibonsai-runtime/native-cuda"]
@@ -138,7 +138,7 @@ wasm = [
 oxibonsai-core.workspace = true
 oxibonsai-rag = { workspace = true, optional = true }
 oxibonsai-eval = { workspace = true, optional = true }
-oxibonsai-tokenizer = { workspace = true, optional = true }
+oxibonsai-tokenizer.workspace = true
 oxibonsai-kernels.workspace = true
 oxibonsai-model.workspace = true
 oxibonsai-runtime = { workspace = true, default-features = false }

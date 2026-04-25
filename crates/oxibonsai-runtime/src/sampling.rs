@@ -57,6 +57,9 @@ pub struct Sampler {
     /// resets length to zero without freeing the backing store, so subsequent
     /// `extend()` calls never reallocate.
     probs_buf: Vec<(usize, f32)>,
+    /// Running history of generated token IDs for repetition penalty.
+    /// Bug #2 fix: Track tokens to apply repetition penalty during sampling.
+    generated_tokens: Vec<u32>,
 }
 
 impl Sampler {
@@ -66,7 +69,13 @@ impl Sampler {
             params,
             rng_state: seed,
             probs_buf: Vec::new(),
+            generated_tokens: Vec::new(),
         }
+    }
+
+    /// Reset the generated token history (e.g., for new conversation turn).
+    pub fn reset(&mut self) {
+        self.generated_tokens.clear();
     }
 
     /// Simple xorshift64 PRNG — no external dependency needed.
@@ -81,14 +90,36 @@ impl Sampler {
 
     /// Sample a token index from logits.
     #[tracing::instrument(skip(self, logits), fields(vocab_size = logits.len()), level = "debug")]
-    pub fn sample(&mut self, logits: &[f32]) -> RuntimeResult<u32> {
+    pub fn sample(&mut self, logits: &mut [f32]) -> RuntimeResult<u32> {
         if logits.is_empty() {
             return Ok(0);
         }
 
+        // Apply repetition penalty BEFORE temperature scaling (Bug #2 fix)
+        // Modify logits in place based on generated token history
+        if self.params.repetition_penalty > 1.0 && !self.generated_tokens.is_empty() {
+            let penalty = self.params.repetition_penalty;
+            for &token_id in &self.generated_tokens {
+                let idx = token_id as usize;
+                if idx < logits.len() {
+                    // For tokens already generated:
+                    // - Positive logits are divided by penalty (discouraged)
+                    // - Negative logits are multiplied by penalty (further discouraged)
+                    let logit = logits[idx];
+                    logits[idx] = if logit >= 0.0 {
+                        logit / penalty
+                    } else {
+                        logit * penalty
+                    };
+                }
+            }
+        }
+
         // Greedy if temperature is ~0
         if self.params.temperature < 1e-6 {
-            return Ok(argmax(logits) as u32);
+            let token = argmax(logits) as u32;
+            self.generated_tokens.push(token);
+            return Ok(token);
         }
 
         // Populate the reusable buffer with temperature-scaled logits.
@@ -161,15 +192,18 @@ impl Sampler {
 
         // Weighted random selection
         let mut cum = 0.0f32;
+        let mut chosen_token = self.probs_buf[0].0 as u32;
         for &(idx, p) in &self.probs_buf {
             cum += p;
             if rand_val <= cum {
-                return Ok(idx as u32);
+                chosen_token = idx as u32;
+                break;
             }
         }
 
-        // Fallback: return the highest probability token
-        Ok(self.probs_buf[0].0 as u32)
+        // Track the chosen token for future repetition penalty applications
+        self.generated_tokens.push(chosen_token);
+        Ok(chosen_token)
     }
 
     /// Get current parameters.
@@ -198,9 +232,9 @@ mod tests {
             temperature: 0.0,
             ..SamplingParams::default()
         };
-        let mut sampler = Sampler::new(params, 42);
-        let logits = vec![0.1, 0.5, 0.3, 0.9, 0.2];
-        let token = sampler.sample(&logits).expect("sampling should succeed");
+        let mut sampler = Sampler::new(params.clone(), 42);
+        let mut logits = vec![0.1, 0.5, 0.3, 0.9, 0.2];
+        let token = sampler.sample(&mut logits).expect("sampling should succeed");
         assert_eq!(token, 3); // index of 0.9
     }
 
@@ -208,9 +242,9 @@ mod tests {
     fn sampling_returns_valid_index() {
         let params = SamplingParams::default();
         let mut sampler = Sampler::new(params, 12345);
-        let logits = vec![0.0f32; 100];
+        let mut logits = vec![0.0f32; 100];
         for _ in 0..50 {
-            let token = sampler.sample(&logits).expect("sampling should succeed");
+            let token = sampler.sample(&mut logits).expect("sampling should succeed");
             assert!(token < 100);
         }
     }
@@ -232,11 +266,77 @@ mod tests {
             max_tokens: 128,
         };
         let mut sampler = Sampler::new(params, 99);
-        let logits: Vec<f32> = (0..200).map(|i| i as f32 * 0.01).collect();
+        let mut logits: Vec<f32> = (0..200).map(|i| i as f32 * 0.01).collect();
         for _ in 0..20 {
-            let token = sampler.sample(&logits).expect("sampling should succeed");
+            let token = sampler.sample(&mut logits).expect("sampling should succeed");
             // Top-k=5 on ascending logits: only the last 5 indices (195-199) are valid
             assert!(token >= 195, "expected token ≥ 195, got {token}");
         }
+    }
+
+    #[test]
+    fn repetition_penalty_affects_sampling() {
+        // Bug #2 fix verification: repetition_penalty should affect sampling
+        // Test that a token in history with high penalty is not chosen
+        
+        // Setup: Create two identical samplers
+        let params_base = SamplingParams {
+            temperature: 0.0, // greedy for predictability
+            top_k: 0,
+            top_p: 1.0,
+            repetition_penalty: 1.0,
+            max_tokens: 128,
+        };
+
+        // Sampler 1: No penalty
+        let mut sampler_no_penalty = Sampler::new(params_base.clone(), 42);
+
+        // Sampler 2: Will have penalty applied to token 5
+        let mut sampler_with_penalty = Sampler::new(params_base.clone(), 42);
+        
+        // First call for sampler_with_penalty: Generate token 5 to add it to history
+        let mut logits_first = vec![0.1f32; 100];
+        logits_first[5] = 100.0; // Strongly prefer token 5
+        let _ = sampler_with_penalty.sample(&mut logits_first).expect("first sample");
+
+        // Now update penalty
+        sampler_with_penalty.params.repetition_penalty = 100.0;
+
+        // Second call: Both samplers see identical logits
+        let mut logits_second = vec![0.1f32; 100];
+        logits_second[5] = 100.0; // Token 5 is highest
+        logits_second[50] = 50.0; // Token 50 is second highest
+
+        let token_no_penalty = sampler_no_penalty.sample(&mut logits_second).expect("no penalty");
+        let token_with_penalty = sampler_with_penalty.sample(&mut logits_second).expect("with penalty");
+
+        // Without penalty, token 5 should be chosen (highest logit)
+        assert_eq!(token_no_penalty, 5, "without penalty, token 5 should win");
+        
+        // With penalty, token 5's logit becomes 100.0 / 100.0 = 1.0
+        // Token 50's logit stays 50.0, so token 50 should win
+        assert_eq!(token_with_penalty, 50, "with penalty, token 5 should be suppressed");
+    }
+
+    #[test]
+    fn sampler_reset_clears_history() {
+        let params = SamplingParams::default();
+        let mut sampler = Sampler::new(params.clone(), 42);
+
+        // Generate some tokens
+        let mut logits = vec![1.0f32; 100];
+        logits[10] = 10.0;
+        logits[20] = 20.0;
+        let _ = sampler.sample(&mut logits);
+        let _ = sampler.sample(&mut logits);
+
+        // Verify history has tokens
+        assert!(!sampler.generated_tokens.is_empty());
+
+        // Reset
+        sampler.reset();
+
+        // Verify history is cleared
+        assert!(sampler.generated_tokens.is_empty());
     }
 }

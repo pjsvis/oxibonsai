@@ -182,7 +182,7 @@ fn test_constrained_sampler_masks_logits() {
     // Token 1 has the highest raw logit, but it's odd → masked.
     // Token 0 is the highest-logit even token.
     let mut logits = vec![2.0_f32, 10.0, 1.0, 0.5];
-    let tok = sampler.sample(&mut logits);
+    let tok = sampler.sample(&mut mut logits);
     assert_eq!(tok, 0, "token 0 should win after masking odd tokens");
 }
 
@@ -196,11 +196,11 @@ fn test_constrained_sampler_greedy_json() {
     // Drive the sampler to emit `{}`
     let mut logits_open = vec![0.0_f32; 256];
     logits_open['{' as usize] = 100.0;
-    sampler.sample(&mut logits_open);
+    sampler.sample(&mut mut logits_open);
 
     let mut logits_close = vec![0.0_f32; 256];
     logits_close['}' as usize] = 100.0;
-    sampler.sample(&mut logits_close);
+    sampler.sample(&mut mut logits_close);
 
     assert!(
         sampler.is_complete(),
@@ -216,7 +216,7 @@ fn test_constrained_sampler_reset() {
 
     let mut logits = vec![0.0_f32; 256];
     logits['{' as usize] = 100.0;
-    sampler.sample(&mut logits);
+    sampler.sample(&mut mut logits);
 
     assert_eq!(sampler.generated_text_len(), 1);
 

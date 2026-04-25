@@ -152,7 +152,7 @@ fn test_pipeline_stop_reason_max_tokens() {
 fn test_sampler_chain_greedy_deterministic() {
     let mut chain1 = SamplerChain::greedy();
     let mut chain2 = SamplerChain::greedy();
-    let logits = vec![0.5_f32, 2.0, 1.0, 3.5, 0.1];
+    let mut logits = vec![0.5_f32, 2.0, 1.0, 3.5, 0.1];
 
     let t1 = chain1.sample(&mut logits.clone());
     let t2 = chain2.sample(&mut logits.clone());
@@ -165,7 +165,7 @@ fn test_sampler_chain_greedy_deterministic() {
 fn test_sampler_chain_temperature_changes_output() {
     // Temperature 0 should give argmax; temperature != 0 may differ.
     let mut greedy_chain = SamplerChain::new(42).add(SamplerStep::Temperature(1e-9));
-    let logits = vec![1.0_f32, 5.0, 2.0, 3.0, 4.0];
+    let mut logits = vec![1.0_f32, 5.0, 2.0, 3.0, 4.0];
     let tok = greedy_chain.sample(&mut logits.clone());
     // With near-zero temperature the highest logit (index 1, value 5.0) wins.
     assert_eq!(tok, 1, "near-zero temperature should pick argmax");
@@ -370,19 +370,19 @@ fn test_speculative_step_returns_accepted() {
 
 #[test]
 fn test_mirostat_v2_samples_valid_token() {
-    let logits = vec![1.0_f32, 5.0, 2.0, 3.0, 4.0];
+    let mut logits = vec![1.0_f32, 5.0, 2.0, 3.0, 4.0];
     let mut sampler = MirostatV2Sampler::new(5.0, 0.1);
     let mut rng = LcgRng::new(42);
-    let tok = sampler.sample(&logits, &mut rng);
+    let tok = sampler.sample(&mut logits, &mut rng);
     assert!(tok < logits.len(), "mirostat v2 must return a valid index");
 }
 
 #[test]
 fn test_typical_sampler_samples_valid_token() {
-    let logits = vec![1.0_f32, 4.0, 2.0, 3.0];
+    let mut logits = vec![1.0_f32, 4.0, 2.0, 3.0];
     let sampler = TypicalSampler::new(0.9, 1);
     let mut rng = LcgRng::new(7);
-    let tok = sampler.sample(&logits, &mut rng);
+    let tok = sampler.sample(&mut logits, &mut rng);
     assert!(
         tok < logits.len(),
         "typical sampler must return a valid index"
@@ -391,10 +391,10 @@ fn test_typical_sampler_samples_valid_token() {
 
 #[test]
 fn test_min_p_sampler_samples_valid_token() {
-    let logits = vec![0.5_f32, 8.0, 1.0, 2.5];
+    let mut logits = vec![0.5_f32, 8.0, 1.0, 2.5];
     let sampler = MinPSampler::new(0.05, 1);
     let mut rng = LcgRng::new(123);
-    let tok = sampler.sample(&logits, &mut rng);
+    let tok = sampler.sample(&mut logits, &mut rng);
     assert!(
         tok < logits.len(),
         "min-p sampler must return a valid index"
@@ -403,10 +403,10 @@ fn test_min_p_sampler_samples_valid_token() {
 
 #[test]
 fn test_eta_sampler_samples_valid_token() {
-    let logits = vec![1.0_f32, 3.0, 2.0, 0.5];
+    let mut logits = vec![1.0_f32, 3.0, 2.0, 0.5];
     let sampler = EtaSampler::new(0.0009, 0.07);
     let mut rng = LcgRng::new(55);
-    let tok = sampler.sample(&logits, &mut rng);
+    let tok = sampler.sample(&mut logits, &mut rng);
     assert!(tok < logits.len(), "eta sampler must return a valid index");
 }
 
@@ -545,7 +545,7 @@ mod tokenizer_tests {
     fn test_chat_template_chatml() {
         use oxibonsai_tokenizer::utils::ChatTemplate;
         let template = ChatTemplate::chatml();
-        let messages = vec![
+        let mut messages = vec![
             ("system", "You are a helpful assistant."),
             ("user", "What is Rust?"),
         ];

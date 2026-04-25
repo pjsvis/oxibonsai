@@ -60,13 +60,13 @@ fn test_lcg_rng_different_seeds_differ() {
 
 #[test]
 fn test_mirostat_v2_basic() {
-    let logits = vec![0.1_f32, 5.0, 2.0, 3.0, 0.5];
+    let mut logits = vec![0.1_f32, 5.0, 2.0, 3.0, 0.5];
     let mut sampler = MirostatV2Sampler::new(5.0, 0.1);
     let mut rng = LcgRng::new(42);
 
     let initial_mu = sampler.mu();
 
-    let idx = sampler.sample(&logits, &mut rng);
+    let idx = sampler.sample(&mut logits, &mut rng);
 
     // Must return a valid index.
     assert!(idx < logits.len(), "token index {idx} out of range");
@@ -84,7 +84,7 @@ fn test_mirostat_v2_basic() {
 fn test_mirostat_v2_reduces_to_greedy_at_low_tau() {
     // With a very low tau (near 0), the threshold probability 2^{-mu} starts very high,
     // so only the top token survives — effectively greedy.
-    let logits = vec![0.01_f32, 10.0, 0.5, 1.0, 0.2];
+    let mut logits = vec![0.01_f32, 10.0, 0.5, 1.0, 0.2];
     let mut rng = LcgRng::new(7);
 
     // Run several steps; the dominant token (index 1, logit=10) should always win.
@@ -109,12 +109,12 @@ fn test_mirostat_v2_reduces_to_greedy_at_low_tau() {
 
 #[test]
 fn test_typical_sampler_basic() {
-    let logits = vec![1.0_f32, 2.0, 3.0, 4.0, 5.0];
+    let mut logits = vec![1.0_f32, 2.0, 3.0, 4.0, 5.0];
     let sampler = TypicalSampler::new(0.9, 1);
     let mut rng = LcgRng::new(55);
 
     for _ in 0..50 {
-        let idx = sampler.sample(&logits, &mut rng);
+        let idx = sampler.sample(&mut logits, &mut rng);
         assert!(
             idx < logits.len(),
             "typical sampler returned out-of-range index {idx}"
@@ -127,12 +127,12 @@ fn test_typical_sampler_min_keep() {
     // Even with p=0.0 (degenerate), min_keep=3 must ensure at least 3 candidates survive.
     // We can't directly observe how many candidates survived, but sampling should not panic
     // and should return a valid index.
-    let logits = vec![10.0_f32, 0.0001, 0.0001, 0.0001, 0.0001];
+    let mut logits = vec![10.0_f32, 0.0001, 0.0001, 0.0001, 0.0001];
     let sampler = TypicalSampler::new(0.01, 3);
     let mut rng = LcgRng::new(11);
 
     for _ in 0..20 {
-        let idx = sampler.sample(&logits, &mut rng);
+        let idx = sampler.sample(&mut logits, &mut rng);
         assert!(idx < logits.len());
     }
 }
@@ -144,12 +144,12 @@ fn test_typical_sampler_min_keep() {
 #[test]
 fn test_min_p_sampler_basic() {
     // With min_p=0.05 and a dominant token, only tokens with p >= 5% of max survive.
-    let logits = vec![5.0_f32, 0.0, 0.0, 0.0, 0.0];
+    let mut logits = vec![5.0_f32, 0.0, 0.0, 0.0, 0.0];
     let sampler = MinPSampler::new(0.05, 1);
     let mut rng = LcgRng::new(33);
 
     for _ in 0..30 {
-        let idx = sampler.sample(&logits, &mut rng);
+        let idx = sampler.sample(&mut logits, &mut rng);
         // The distribution is heavily skewed; index 0 should dominate.
         assert!(
             idx < logits.len(),
@@ -160,12 +160,12 @@ fn test_min_p_sampler_basic() {
 
 #[test]
 fn test_min_p_sampler_returns_valid_for_uniform() {
-    let logits = vec![1.0_f32; 20];
+    let mut logits = vec![1.0_f32; 20];
     let sampler = MinPSampler::new(0.05, 1);
     let mut rng = LcgRng::new(22);
 
     for _ in 0..100 {
-        let idx = sampler.sample(&logits, &mut rng);
+        let idx = sampler.sample(&mut logits, &mut rng);
         assert!(idx < logits.len());
     }
 }
@@ -176,12 +176,12 @@ fn test_min_p_sampler_returns_valid_for_uniform() {
 
 #[test]
 fn test_eta_sampler_basic() {
-    let logits = vec![0.5_f32, 3.0, 1.0, 2.0, 0.1];
+    let mut logits = vec![0.5_f32, 3.0, 1.0, 2.0, 0.1];
     let sampler = EtaSampler::new(0.0009, 0.07);
     let mut rng = LcgRng::new(77);
 
     for _ in 0..50 {
-        let idx = sampler.sample(&logits, &mut rng);
+        let idx = sampler.sample(&mut logits, &mut rng);
         assert!(
             idx < logits.len(),
             "eta sampler returned out-of-range index {idx}"
@@ -193,7 +193,7 @@ fn test_eta_sampler_basic() {
 fn test_eta_sampler_empty_logits() {
     let sampler = EtaSampler::new(0.0009, 0.07);
     let mut rng = LcgRng::new(1);
-    let idx = sampler.sample(&[], &mut rng);
+    let idx = sampler.sample(&mut [], &mut rng);
     assert_eq!(idx, 0, "empty logits should return 0");
 }
 
@@ -229,7 +229,7 @@ fn test_sampler_chain_greedy() {
 #[test]
 fn test_sampler_chain_temperature() {
     // Temperature ~ 0 should collapse to greedy.
-    let logits = vec![1.0_f32, 8.0, 2.0, 3.0];
+    let mut logits = vec![1.0_f32, 8.0, 2.0, 3.0];
     let mut chain = SamplerChain::new(42)
         .add(SamplerStep::Temperature(1e-7))
         .add(SamplerStep::Greedy);
@@ -247,7 +247,7 @@ fn test_sampler_chain_temperature() {
 #[test]
 fn test_sampler_chain_composable() {
     // Chain multiple steps; result must be a valid index.
-    let logits = vec![0.5_f32, 1.0, 2.5, 0.1, 3.0, 1.5];
+    let mut logits = vec![0.5_f32, 1.0, 2.5, 0.1, 3.0, 1.5];
     let mut chain = SamplerChain::new(999)
         .add(SamplerStep::Temperature(0.8))
         .add(SamplerStep::TopK(4))
@@ -295,7 +295,7 @@ fn test_softmax_sums_to_one() {
 fn test_entropy_uniform_distribution() {
     // For a uniform distribution over n events, H = ln(n).
     let n = 8_usize;
-    let probs = vec![1.0_f32 / n as f32; n];
+    let mut probs = vec![1.0_f32 / n as f32; n];
     let h = entropy(&probs);
     let expected = (n as f32).ln();
     assert!(
@@ -322,7 +322,7 @@ fn test_entropy_degenerate_is_zero() {
 
 #[test]
 fn test_top_k_indices_correct() {
-    let logits = vec![0.1_f32, 5.0, 3.0, 7.0, 2.0, 6.0];
+    let mut logits = vec![0.1_f32, 5.0, 3.0, 7.0, 2.0, 6.0];
     // Expected descending order: 7.0(3), 6.0(5), 5.0(1)
     let indices = top_k_indices(&logits, 3);
     assert_eq!(indices.len(), 3, "should return exactly 3 indices");
@@ -338,7 +338,7 @@ fn test_top_k_indices_correct() {
 
 #[test]
 fn test_top_k_indices_clamps_to_vocab() {
-    let logits = vec![1.0_f32, 2.0, 3.0];
+    let mut logits = vec![1.0_f32, 2.0, 3.0];
     // Requesting k=10 on a 3-element slice should return all 3.
     let indices = top_k_indices(&logits, 10);
     assert_eq!(indices.len(), 3);
@@ -350,7 +350,7 @@ fn test_top_k_indices_clamps_to_vocab() {
 
 #[test]
 fn test_apply_temperature_scales_logits() {
-    let logits = vec![2.0_f32, 4.0, 6.0];
+    let mut logits = vec![2.0_f32, 4.0, 6.0];
     let mut scaled = logits.clone();
     apply_temperature(&mut scaled, 2.0);
     // Each element should be halved.
@@ -365,7 +365,7 @@ fn test_apply_temperature_scales_logits() {
 
 #[test]
 fn test_apply_temperature_zero_is_noop() {
-    let logits = vec![1.0_f32, 2.0, 3.0];
+    let mut logits = vec![1.0_f32, 2.0, 3.0];
     let mut copy = logits.clone();
     apply_temperature(&mut copy, 0.0);
     // Temperature=0 must leave logits unchanged (greedy is handled elsewhere).
@@ -385,7 +385,7 @@ fn test_repetition_penalty_reduces_seen_tokens() {
     let original = logits.clone();
 
     // Penalise token 2 (logit=3.0) and token 4 (logit=5.0).
-    let seen = vec![2_u32, 4];
+    let mut seen = vec![2_u32, 4];
     apply_repetition_penalty(&mut logits, &seen, 1.5);
 
     // Penalised tokens should have smaller logits.
@@ -422,7 +422,7 @@ fn test_repetition_penalty_unity_is_noop() {
 
 #[test]
 fn test_sampler_chain_default_chat_preset() {
-    let logits = vec![0.5_f32, 3.0, 1.0, 2.0, 0.1, 4.0, 1.5];
+    let mut logits = vec![0.5_f32, 3.0, 1.0, 2.0, 0.1, 4.0, 1.5];
     let mut chain = SamplerChain::default_chat(42);
 
     // Should produce valid indices across many runs without panicking.
@@ -438,7 +438,7 @@ fn test_sampler_chain_default_chat_preset() {
 
 #[test]
 fn test_sampler_chain_creative_preset() {
-    let logits = vec![1.0_f32, 2.0, 3.0, 4.0, 5.0];
+    let mut logits = vec![1.0_f32, 2.0, 3.0, 4.0, 5.0];
     let mut chain = SamplerChain::creative(77);
 
     for _ in 0..50 {
@@ -450,7 +450,7 @@ fn test_sampler_chain_creative_preset() {
 
 #[test]
 fn test_sampler_chain_precise_preset() {
-    let logits = vec![0.1_f32, 0.2, 8.0, 0.3, 0.4];
+    let mut logits = vec![0.1_f32, 0.2, 8.0, 0.3, 0.4];
     let mut chain = SamplerChain::precise(13);
 
     for _ in 0..50 {

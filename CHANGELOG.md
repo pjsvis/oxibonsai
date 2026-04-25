@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### BREAKING
+- CLI now **requires** `--tokenizer` for `run` and `chat` commands.
+  The fallback behavior (using hardcoded token 151644) has been removed.
+  Update scripts/automations to include `--tokenizer <path/to/tokenizer.json>`.
+
+### Added
+- Qwen3 chat template rendering with system prompt support via new `--system` flag for both Run and Chat commands
+- Interactive Chat REPL with multi-turn conversation history, `/system`, `/help`, `/reset`, and `/quit` commands
+- Repetition penalty now actually applied during sampling (previously threaded but unused)
+- TOML `[sampling]` config values are now validated before use
+
+### Fixed
+- Chat history now correctly stores both user and assistant messages for proper multi-turn context
+- Repetition penalty CLI flag and TOML value now affect sampling (Bug #2 fix)
+- TOML sampling config values are validated (Bug #3 fix)
+
 ## [0.1.2] - 2026-04-19
 
 ### Added
