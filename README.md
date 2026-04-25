@@ -122,6 +122,9 @@ Ternary weights trade roughly +600 MB (at 8B scale) for ~5 additional benchmark 
 
 ## Installation
 
+**Rust version:** 1.86+ (stable). Nightly is no longer required — OxiBonsai builds
+on stable Rust on all platforms (x86-64 and AArch64).
+
 Add OxiBonsai to your `Cargo.toml`:
 
 ```toml
@@ -134,7 +137,11 @@ oxibonsai = "0.1.2"
 ### 1. Build
 
 ```bash
-cargo build --release
+# Stable Rust (all platforms including AArch64)
+cargo build --release --features "simd-neon metal native-tokenizer"
+
+# Optional: Enable nightly intrinsics (prefetch) — requires nightly toolchain
+# cargo build --release --features "simd-neon metal native-tokenizer nightly"
 ```
 
 ### 2. Get a model
@@ -254,6 +261,9 @@ port = 8080
 log_level = "info"
 json_logs = false
 ```
+
+**Precedence:** CLI flags override TOML values, which override defaults
+(`defaults < TOML < CLI`).
 
 ## Crate Structure
 

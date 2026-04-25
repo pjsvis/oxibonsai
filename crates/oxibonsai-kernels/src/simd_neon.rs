@@ -20,6 +20,8 @@ use oxibonsai_core::tensor::{BlockQ1_0G128, QK1_0_G128};
 
 #[cfg(target_arch = "aarch64")]
 use crate::error::{KernelError, KernelResult};
+#[cfg(target_arch = "aarch64")]
+use crate::prefetch::prefetch_read;
 
 // --- NEON Dequantization ---
 
@@ -350,7 +352,7 @@ pub unsafe fn gemv_1bit_g128_neon_prefetch(
         // Prefetch next row's first block into L1 cache
         if row + 1 < n_rows {
             let next_row_ptr = blocks.as_ptr().add((row + 1) * blocks_per_row) as *const i8;
-            core::arch::aarch64::_prefetch(next_row_ptr, 0, 3);
+            prefetch_read(next_row_ptr, crate::prefetch::PrefetchLocality::High);
         }
 
         // Use two accumulators for better ILP
@@ -365,7 +367,7 @@ pub unsafe fn gemv_1bit_g128_neon_prefetch(
             // Prefetch next block's data
             if bi + 1 < blocks_per_row {
                 let next_block_ptr = row_blocks.as_ptr().add(bi + 1) as *const i8;
-                core::arch::aarch64::_prefetch(next_block_ptr, 0, 3);
+                prefetch_read(next_block_ptr, crate::prefetch::PrefetchLocality::High);
             }
 
             // Unrolled: process 2 bytes (16 elements) per iteration
@@ -485,7 +487,7 @@ pub unsafe fn gemm_1bit_g128_neon_prefetch(
             // Prefetch next weight row
             if ni + 1 < n_rows {
                 let next_ptr = blocks.as_ptr().add((ni + 1) * blocks_per_row) as *const i8;
-                core::arch::aarch64::_prefetch(next_ptr, 0, 3);
+                prefetch_read(next_ptr, crate::prefetch::PrefetchLocality::High);
             }
 
             let mut acc0 = vdupq_n_f32(0.0);
@@ -499,7 +501,7 @@ pub unsafe fn gemm_1bit_g128_neon_prefetch(
                 // Prefetch next block
                 if bi + 1 < blocks_per_row {
                     let next_block = row_blocks.as_ptr().add(bi + 1) as *const i8;
-                    core::arch::aarch64::_prefetch(next_block, 0, 3);
+                    prefetch_read(next_block, crate::prefetch::PrefetchLocality::High);
                 }
 
                 // Unrolled: 2 bytes per iteration
@@ -728,14 +730,14 @@ pub unsafe fn gemv_tq2_0_g128_neon_prefetch(
 
         if row + 1 < n_rows {
             let next_row_ptr = blocks.as_ptr().add((row + 1) * blocks_per_row) as *const i8;
-            core::arch::aarch64::_prefetch(next_row_ptr, 0, 3);
+            prefetch_read(next_row_ptr, crate::prefetch::PrefetchLocality::High);
         }
 
         let mut row_sum = 0.0f32;
         for block_idx in 0..blocks_per_row {
             if block_idx + 1 < blocks_per_row {
                 let next_block_ptr = blocks.as_ptr().add(row_offset + block_idx + 1) as *const i8;
-                core::arch::aarch64::_prefetch(next_block_ptr, 0, 3);
+                prefetch_read(next_block_ptr, crate::prefetch::PrefetchLocality::High);
             }
 
             let block = &blocks[row_offset + block_idx];

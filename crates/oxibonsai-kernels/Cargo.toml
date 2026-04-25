@@ -18,6 +18,7 @@ default = []
 simd-avx2 = []
 simd-avx512 = []
 simd-neon = []
+nightly = []  # Enable nightly intrinsics (prefetch) — only useful on nightly toolchain
 wasm = []
 cuda = ["gpu", "scirs2-core/gpu", "scirs2-core/cuda"]
 native-cuda = ["gpu", "dep:cudarc"]

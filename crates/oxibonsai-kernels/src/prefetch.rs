@@ -193,8 +193,11 @@ fn prefetch_write_x86(ptr: *const i8, locality: PrefetchLocality) {
 }
 
 // ── AArch64 implementation ──────────────────────────────────────────────
+//
+// On nightly: uses `core::arch::aarch64::_prefetch` intrinsic (unstable)
+// On stable: uses inline assembly `prfm` instruction (stable since Rust 1.59)
 
-#[cfg(target_arch = "aarch64")]
+#[cfg(all(target_arch = "aarch64", feature = "nightly"))]
 #[inline(always)]
 fn prefetch_read_aarch64(ptr: *const i8, locality: PrefetchLocality) {
     // SAFETY: __prefetch is safe — invalid addresses are silently ignored on ARM.
@@ -214,7 +217,44 @@ fn prefetch_read_aarch64(ptr: *const i8, locality: PrefetchLocality) {
     }
 }
 
-#[cfg(target_arch = "aarch64")]
+/// Prefetch read using `prfm` inline assembly (stable AArch64 fallback).
+///
+/// `prfm pldl1keep, [x, #0]` — prefetch for read, level 1 (L1), keep (temporal).
+/// This is stable inline assembly available since Rust 1.59.
+#[cfg(all(target_arch = "aarch64", not(feature = "nightly")))]
+#[inline(always)]
+fn prefetch_read_aarch64(ptr: *const i8, locality: PrefetchLocality) {
+    // SAFETY: prfm is safe — invalid addresses are silently ignored on ARM.
+    // The inline assembly is marked nostack because prefetch never touches the stack.
+    unsafe {
+        match locality {
+            PrefetchLocality::High => {
+                core::arch::asm!(
+                    "prfm pldl1keep, [{x}, #0]",
+                    x = in(reg) ptr,
+                    options(nostack, preserves_flags, readonly)
+                );
+            }
+            PrefetchLocality::Medium => {
+                core::arch::asm!(
+                    "prfm pldl1keep, [{x}, #0]",
+                    x = in(reg) ptr,
+                    options(nostack, preserves_flags, readonly)
+                );
+            }
+            PrefetchLocality::Low => {
+                // Non-temporal: pldl1strm (streaming, L1 only transient)
+                core::arch::asm!(
+                    "prfm pldl1strm, [{x}, #0]",
+                    x = in(reg) ptr,
+                    options(nostack, preserves_flags, readonly)
+                );
+            }
+        }
+    }
+}
+
+#[cfg(all(target_arch = "aarch64", feature = "nightly"))]
 #[inline(always)]
 fn prefetch_write_aarch64(ptr: *const i8, locality: PrefetchLocality) {
     // SAFETY: rw=1 for write/store prefetch. Const arguments required.
@@ -228,6 +268,40 @@ fn prefetch_write_aarch64(ptr: *const i8, locality: PrefetchLocality) {
             }
             PrefetchLocality::Low => {
                 core::arch::aarch64::_prefetch(ptr, 1, 0);
+            }
+        }
+    }
+}
+
+/// Prefetch write using `prfm` inline assembly (stable AArch64 fallback).
+#[cfg(all(target_arch = "aarch64", not(feature = "nightly")))]
+#[inline(always)]
+fn prefetch_write_aarch64(ptr: *const i8, locality: PrefetchLocality) {
+    // SAFETY: prfm is safe — invalid addresses are silently ignored on ARM.
+    unsafe {
+        match locality {
+            PrefetchLocality::High => {
+                // pstl1keep: prefetch for store, level 1, keep
+                core::arch::asm!(
+                    "prfm pstl1keep, [{x}, #0]",
+                    x = in(reg) ptr,
+                    options(nostack, preserves_flags, readonly)
+                );
+            }
+            PrefetchLocality::Medium => {
+                core::arch::asm!(
+                    "prfm pstl1keep, [{x}, #0]",
+                    x = in(reg) ptr,
+                    options(nostack, preserves_flags, readonly)
+                );
+            }
+            PrefetchLocality::Low => {
+                // Non-temporal: pstl1strm
+                core::arch::asm!(
+                    "prfm pstl1strm, [{x}, #0]",
+                    x = in(reg) ptr,
+                    options(nostack, preserves_flags, readonly)
+                );
             }
         }
     }
