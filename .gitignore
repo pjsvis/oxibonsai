@@ -31,3 +31,8 @@ Thumbs.db
 
 # DL models
 models/*
+
+# Local working directories (briefs, debriefs, playbooks)
+briefs/
+debriefs/
+playbooks/
