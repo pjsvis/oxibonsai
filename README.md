@@ -255,6 +255,9 @@ log_level = "info"
 json_logs = false
 ```
 
+**Precedence:** CLI flags override TOML values, which override defaults
+(`defaults < TOML < CLI`).
+
 ## Crate Structure
 
 ```

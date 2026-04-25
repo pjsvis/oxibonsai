@@ -17,6 +17,19 @@ mod cli {
 
     use oxibonsai_runtime::OxiBonsaiConfig;
 
+    /// Validate that repetition_penalty is >= 1.0 (1.0 = disabled).
+    fn repetition_penalty_parser(s: &str) -> Result<f32, String> {
+        let value: f32 = s
+            .parse()
+            .map_err(|_| format!("invalid repetition_penalty: '{s}'"))?;
+        if value < 1.0 {
+            return Err(format!(
+                "repetition_penalty must be >= 1.0, got {value}"
+            ));
+        }
+        Ok(value)
+    }
+
     #[derive(Parser)]
     #[command(
         name = "oxibonsai",
@@ -45,20 +58,24 @@ mod cli {
             prompt: String,
 
             /// Maximum number of tokens to generate.
-            #[arg(long, default_value_t = 256)]
-            max_tokens: usize,
+            #[arg(long)]
+            max_tokens: Option<usize>,
 
-            /// Sampling temperature (0.0 = greedy).
-            #[arg(long, default_value_t = 0.7)]
-            temperature: f32,
+            /// Sampling temperature (0.0 = greedy). Falls back to TOML config if not set.
+            #[arg(long)]
+            temperature: Option<f32>,
 
-            /// Top-k sampling (0 = disabled).
-            #[arg(long, default_value_t = 40)]
-            top_k: usize,
+            /// Top-k sampling (0 = disabled). Falls back to TOML config if not set.
+            #[arg(long)]
+            top_k: Option<usize>,
 
-            /// Top-p (nucleus) sampling.
-            #[arg(long, default_value_t = 0.9)]
-            top_p: f32,
+            /// Top-p (nucleus) sampling. Falls back to TOML config if not set.
+            #[arg(long)]
+            top_p: Option<f32>,
+
+            /// Repetition penalty (>= 1.0, 1.0 = disabled). Falls back to TOML config if not set.
+            #[arg(long, value_parser = repetition_penalty_parser)]
+            repetition_penalty: Option<f32>,
 
             /// Random seed.
             #[arg(long, default_value_t = 42)]
@@ -79,21 +96,25 @@ mod cli {
             #[arg(short, long)]
             model: String,
 
-            /// Maximum number of tokens to generate per turn.
-            #[arg(long, default_value_t = 512)]
-            max_tokens: usize,
+            /// Maximum number of tokens to generate per turn. Falls back to TOML config if not set.
+            #[arg(long)]
+            max_tokens: Option<usize>,
 
-            /// Sampling temperature (0.0 = greedy).
-            #[arg(long, default_value_t = 0.7)]
-            temperature: f32,
+            /// Sampling temperature (0.0 = greedy). Falls back to TOML config if not set.
+            #[arg(long)]
+            temperature: Option<f32>,
 
-            /// Top-k sampling (0 = disabled).
-            #[arg(long, default_value_t = 40)]
-            top_k: usize,
+            /// Top-k sampling (0 = disabled). Falls back to TOML config if not set.
+            #[arg(long)]
+            top_k: Option<usize>,
 
-            /// Top-p (nucleus) sampling.
-            #[arg(long, default_value_t = 0.9)]
-            top_p: f32,
+            /// Top-p (nucleus) sampling. Falls back to TOML config if not set.
+            #[arg(long)]
+            top_p: Option<f32>,
+
+            /// Repetition penalty (>= 1.0, 1.0 = disabled). Falls back to TOML config if not set.
+            #[arg(long, value_parser = repetition_penalty_parser)]
+            repetition_penalty: Option<f32>,
 
             /// Random seed.
             #[arg(long, default_value_t = 42)]
@@ -234,6 +255,7 @@ mod cli {
                 temperature,
                 top_k,
                 top_p,
+                repetition_penalty,
                 seed,
                 max_seq_len,
                 tokenizer,
@@ -244,10 +266,21 @@ mod cli {
                     prompt
                 };
 
+                // Apply precedence: CLI flags override TOML, which overrides defaults.
+                let s = &config.sampling;
+                let temperature = temperature.unwrap_or(s.temperature);
+                let top_k = top_k.unwrap_or(s.top_k);
+                let top_p = top_p.unwrap_or(s.top_p);
+                let repetition_penalty = repetition_penalty.unwrap_or(s.repetition_penalty);
+                let max_tokens = max_tokens.unwrap_or(s.max_tokens);
+
                 tracing::info!(
                     model = %model,
                     max_tokens,
                     temperature,
+                    top_k,
+                    top_p,
+                    repetition_penalty,
                     "starting inference"
                 );
 
@@ -260,7 +293,7 @@ mod cli {
                     temperature,
                     top_k,
                     top_p,
-                    repetition_penalty: 1.1,
+                    repetition_penalty,
                     ..oxibonsai_runtime::sampling::SamplingParams::default()
                 };
 
@@ -421,10 +454,19 @@ mod cli {
                 temperature,
                 top_k,
                 top_p,
+                repetition_penalty,
                 seed,
                 max_seq_len,
                 tokenizer,
             } => {
+                // Apply precedence: CLI flags override TOML, which overrides defaults.
+                let s = &config.sampling;
+                let temperature = temperature.unwrap_or(s.temperature);
+                let top_k = top_k.unwrap_or(s.top_k);
+                let top_p = top_p.unwrap_or(s.top_p);
+                let repetition_penalty = repetition_penalty.unwrap_or(s.repetition_penalty);
+                let max_tokens = max_tokens.unwrap_or(s.max_tokens);
+
                 // Memory-map the GGUF file
                 let mmap =
                     oxibonsai_core::gguf::reader::mmap_gguf_file(std::path::Path::new(&model))?;
@@ -434,7 +476,7 @@ mod cli {
                     temperature,
                     top_k,
                     top_p,
-                    repetition_penalty: 1.1,
+                    repetition_penalty,
                     ..oxibonsai_runtime::sampling::SamplingParams::default()
                 };
 
