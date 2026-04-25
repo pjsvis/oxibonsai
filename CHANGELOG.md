@@ -27,6 +27,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### New Features
 - `--features nightly` re-enables AArch64 prefetch intrinsics (requires nightly toolchain)
+- **Qwen3 chat template**: All `run` and `chat` commands apply Qwen3 template format
+- **--system flag**: Custom system prompts for both `run` and `chat` commands
+- **Multi-turn chat history**: Chat REPL maintains conversation history
+- **REPL commands**: `/system`, `/help`, improved `/reset` with history clear
 
 ## [0.1.2] - 2026-04-19
 
