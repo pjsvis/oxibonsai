@@ -13,15 +13,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Precedence chain implemented: `defaults < TOML < CLI` for all sampling params
 - `tests/sampling_config_overrides.rs` — 10 tests for precedence chain
 - `playbooks/justfile-scripts-playbook.md` — Justfile/Scripts architecture guide
+- **Stable Rust support for `oxibonsai-kernels`**: AArch64 builds on stable toolchains without nightly
 
 ### Changed
 - `temperature`, `top_k`, `top_p`, `max_tokens` CLI flags now properly override TOML values
 - Justfile refactored as pure facade delegating to `scripts/*.sh`
+- README: "Rust version: 1.86+ (stable)" — nightly no longer required
 
 ### Fixed
 - Repetition penalty was hardcoded to `1.1` ignoring TOML config
 - Justfile parser issues with dots in variable/recipe names (resolved with underscore naming)
+- `oxibonsai-kernels` `#![feature(stdarch_aarch64_prefetch)]` now gated behind `nightly` feature
 
+### New Features
+- `--features nightly` re-enables AArch64 prefetch intrinsics (requires nightly toolchain)
 
 ## [0.1.2] - 2026-04-19
 
