@@ -218,25 +218,25 @@ pub fn unpack_blocks_from_gemv(
 
 /// Emit a software prefetch hint for read access.
 ///
-/// On AArch64: uses `__prefetch` intrinsic for data read into L1.
-/// On x86_64: uses `_mm_prefetch` with `_MM_HINT_T0` (all cache levels).
-/// On other targets: no-op (compiler may still generate prefetch if it sees fit).
+/// On AArch64 nightly: uses `__prefetch` intrinsic.
+/// On AArch64 stable: uses inline assembly `prfm` instruction.
+/// On x86_64: uses `_mm_prefetch` with `_MM_HINT_T0` (stable since Rust 1.59).
+/// On other targets: no-op.
 ///
-/// This is a *hint* — the CPU is free to ignore it. The benefit comes
-/// from overlapping prefetch latency with computation in inner loops.
+/// This is a *hint* — the CPU is free to ignore it.
 #[inline(always)]
 pub fn prefetch_read<T>(ptr: *const T) {
     #[cfg(target_arch = "aarch64")]
     {
-        // SAFETY: prefetch is always safe, it's just a hint
-        unsafe {
-            core::arch::aarch64::_prefetch(ptr as *const i8, 0, 3);
-        }
+        crate::prefetch::prefetch_read(
+            ptr.cast::<i8>(),
+            crate::prefetch::PrefetchLocality::High,
+        );
     }
 
     #[cfg(target_arch = "x86_64")]
     {
-        // SAFETY: prefetch is always safe, it's just a hint
+        // SAFETY: prefetch is always safe
         unsafe {
             core::arch::x86_64::_mm_prefetch(ptr as *const i8, core::arch::x86_64::_MM_HINT_T0);
         }
@@ -257,18 +257,16 @@ pub fn prefetch_read<T>(ptr: *const T) {
 pub fn prefetch_write<T>(ptr: *const T) {
     #[cfg(target_arch = "aarch64")]
     {
-        // SAFETY: prefetch is always safe
-        unsafe {
-            // _prefetch with pst=1 means prefetch for store
-            core::arch::aarch64::_prefetch(ptr as *const i8, 1, 3);
-        }
+        crate::prefetch::prefetch_write(
+            ptr as *mut i8,
+            crate::prefetch::PrefetchLocality::High,
+        );
     }
 
     #[cfg(target_arch = "x86_64")]
     {
         // SAFETY: prefetch is always safe
         unsafe {
-            // _MM_HINT_ET0: exclusive prefetch to all cache levels
             core::arch::x86_64::_mm_prefetch(ptr as *const i8, core::arch::x86_64::_MM_HINT_T0);
         }
     }

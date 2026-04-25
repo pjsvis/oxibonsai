@@ -122,6 +122,9 @@ Ternary weights trade roughly +600 MB (at 8B scale) for ~5 additional benchmark 
 
 ## Installation
 
+**Rust version:** 1.86+ (stable). Nightly is no longer required — OxiBonsai builds
+on stable Rust on all platforms (x86-64 and AArch64).
+
 Add OxiBonsai to your `Cargo.toml`:
 
 ```toml
@@ -134,7 +137,11 @@ oxibonsai = "0.1.2"
 ### 1. Build
 
 ```bash
-cargo build --release
+# Stable Rust (all platforms including AArch64)
+cargo build --release --features "simd-neon metal native-tokenizer"
+
+# Optional: Enable nightly intrinsics (prefetch) — requires nightly toolchain
+# cargo build --release --features "simd-neon metal native-tokenizer nightly"
 ```
 
 ### 2. Get a model
@@ -253,6 +260,57 @@ port = 8080
 [observability]
 log_level = "info"
 json_logs = false
+```
+
+**Precedence:** CLI flags override TOML values, which override defaults
+(`defaults < TOML < CLI`).
+
+## Chat Templates and System Prompts
+
+OxiBonsai applies the Qwen3 chat template to all `run` and `chat` commands.
+The template wraps each turn in `<|im_start|>{role}\n...<|im_end|>` format:
+
+```
+<|im_start|>system
+{system_prompt}<|im_end|>
+<|im_start|>user
+{user_input}<|im_end|>
+<|im_start|>assistant
+{model_response}<|im_end|>
+```
+
+### CLI Flags
+
+| Flag | Description |
+|------|-------------|
+| `--system <TEXT>` | Custom system prompt (default: "You are a helpful assistant.") |
+| `--tokenizer <PATH>` | Required for chat template rendering |
+
+### REPL Commands (chat mode)
+
+| Command | Description |
+|---------|-------------|
+| `/reset` | Clear conversation history and reset engine |
+| `/system [text]` | Show current system prompt (no arg) or set new one |
+| `/help` | List available REPL commands |
+
+### Examples
+
+```bash
+# Default system prompt
+./target/release/oxibonsai run --model models/Bonsai-8B.gguf \
+  --tokenizer models/tokenizer.json --prompt "What is 2+2?"
+
+# Custom system prompt
+./target/release/oxibonsai run --model models/Bonsai-8B.gguf \
+  --tokenizer models/tokenizer.json \
+  --system "You are a terse expert. Reply in one sentence." \
+  --prompt "What is 2+2?"
+
+# Interactive chat with custom system prompt
+./target/release/oxibonsai chat --model models/Bonsai-8B.gguf \
+  --tokenizer models/tokenizer.json \
+  --system "You only answer in haiku."
 ```
 
 ## Crate Structure
